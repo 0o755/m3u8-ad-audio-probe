@@ -1,0 +1,25 @@
+# 每次提交规则时校验唯一发布文件，避免 SDK 拉到不可解析的内容。
+name: Validate rules
+
+on:
+  push:
+    paths:
+      - "rules.json"
+      - "rule-schema.json"
+      - "tools/**"
+  pull_request:
+    paths:
+      - "rules.json"
+      - "rule-schema.json"
+      - "tools/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tools/*.test.mjs
+      - run: node tools/validate-rules.mjs rules.json

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "全局广告音频规则 v3",
+  "type": "object",
+  "required": ["schemaVersion", "revision", "algorithm", "rules"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 3 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "algorithm": {
+      "type": "object",
+      "required": ["id", "sampleRate", "windowMs", "hopMs", "bandCount"],
+      "properties": {
+        "id": { "type": "string", "const": "spectral-sequence-v3" },
+        "sampleRate": { "type": "integer", "const": 16000 },
+        "windowMs": { "type": "integer", "const": 512 },
+        "hopMs": { "type": "integer", "const": 256 },
+        "bandCount": { "type": "integer", "const": 16 }
+      },
+      "additionalProperties": false
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "object",
+        "required": ["id", "durationMs", "anchorOffsetMs", "anchorDurationMs", "fingerprints"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "durationMs": { "type": "integer", "minimum": 1000, "maximum": 600000 },
+          "anchorOffsetMs": { "type": "integer", "minimum": 0 },
+          "anchorDurationMs": { "type": "integer", "minimum": 2000, "maximum": 5000 },
+          "fingerprints": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "required": ["offsetMs", "hashes"],
+              "properties": {
+                "offsetMs": { "type": "integer", "minimum": 0, "maximum": 255 },
+                "hashes": {
+                  "type": "array",
+                  "minItems": 4,
+                  "maxItems": 64,
+                  "items": { "type": "string", "pattern": "^[0-9a-f]{8}$" }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

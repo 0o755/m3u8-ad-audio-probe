@@ -1,0 +1,9 @@
+# 本地编辑器和临时导出文件不进入规则仓库。
+.idea/
+.vscode/
+coverage/
+*.log
+*.tmp
+exports/
+.DS_Store
+Thumbs.db

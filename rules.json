@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 3,
+  "revision": 1,
+  "algorithm": {
+    "id": "spectral-sequence-v3",
+    "sampleRate": 16000,
+    "windowMs": 512,
+    "hopMs": 256,
+    "bandCount": 16
+  },
+  "rules": []
+}
