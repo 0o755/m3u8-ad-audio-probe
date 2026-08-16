@@ -1,52 +1,69 @@
 # M3U8 全局广告音频规则
 
-本仓库维护一份与网站、频道、播放源无关的广告音频频谱规则。发布给 SDK 使用者的唯一产物是根目录的 `rules.json`。
+本仓库维护与网站、频道、播放源无关的广告音频频谱规则。发布给 Probe SDK 和采集器使用的唯一数据文件是根目录的 `rules.json`。
 
 ## 规则格式
 
-`rules.json` 包含以下规则信息：
+仓库从旧格式直接断代到 Probe Rules v1，不提供旧规则兼容或转换器。根节点固定包含：
 
-- 频谱算法参数和版本；
-- 广告 ID；
-- 完整广告时长；
-- 锚点相对广告开头的偏移和锚点时长；
-- 锚点范围内按时间顺序排列、带相位偏移的频谱指纹序列。
-- 可选的根节点 `testUrls` 和 `testPositionsMs`，按规则 ID 保存用于人工复测的 HTTP(S) 地址及广告开始毫秒位置。
+- `format: "ad-audio-probe-rules"`；
+- `schemaVersion: 1`；
+- 从 1 开始、每次发布内容变化都递增的 `revision`；
+- `algorithm: "spectral-sequence-v1"`；
+- 最多 1024 条广告规则的 `rules` 数组。
 
-音频规则本身不绑定 host、频道、清晰度或地区；测试链接和位置只用于人工回放，不参与匹配、规则身份或自动跳过。规则文件是公开产物，测试地址不得包含账号令牌或其他秘密。
+每条规则记录广告时长、锚点位置以及 `0`、`64`、`128`、`192` 毫秒四个固定相位的指纹。规则只要存在于数组中就会参与匹配，没有启用、待验证或优先级字段。
 
-单条规则只保存广告开头 2 至 5 秒的连续锚点频谱，不保存完整广告音频指纹。每条规则最多包含四个 `fingerprints` 相位，每个相位明确记录 `offsetMs` 和 `hashes`。SDK 先用 2 帧筛选候选，再按开头区分度使用 4 至 8 帧确认，确认后使用绝对时间轴计算跳过位置。相同锚点前缀却对应不同结束偏移的规则会被校验器拒绝，运行时仍会对近似指纹冲突执行失败关闭。
+规则可以内嵌可选的 `test`：
+
+```json
+{
+  "test": {
+    "url": "https://example.com/video/index.m3u8",
+    "adStartMs": 120000
+  }
+}
+```
+
+`test` 只供采集器定位和复测，不参与匹配。规则文件是公开产物，测试地址不得包含账号令牌或其他秘密。
+
+完整结构见 `rule-schema.json`。运行时约束还包括锚点范围、四相位长度公式、开头区分度、65536 帧全局上限和跨规则前缀安全；Node 校验器与 Probe SDK 解析器执行相同合同。
 
 ## 贡献流程
 
-1. 在采集 APK 或 HTML5 工具粘贴 M3U8，可自动扫描候选广告，也可手工设置开始位置和完整时长。
-2. 工具自动回放每个候选并采集开头 2 至 5 秒的锚点频谱。
-3. 提交工具生成的单条或多条 v3 规则文件。
-4. 维护者运行 `node tools/merge-rule.mjs rules.json ad-rule.json` 一次合并整批规则。
-5. 运行 `node tools/validate-rules.mjs rules.json`。
-6. 通过 Pull Request 合并，发布工作流会再次校验规则。
+1. 在采集器中粘贴普通 M3U8 或 MP4 点播地址，自动扫描候选广告或手工设置广告范围。
+2. 采集器生成一条或多条 Probe Rules v1 规则，可同时保存测试地址与广告开始位置。
+3. 运行 `node tools/merge-rule.mjs rules.json ad-rule.json` 合并整批规则。
+4. 运行 `node tools/validate-rules.mjs rules.json` 校验发布文件。
+5. 通过 Pull Request 合并；CI 会再次运行全部合同测试和发布文件校验。
 
-维护校验器时还应运行 `node --test tools/*.test.mjs`，CI 会同时执行合同测试和主文件校验。
+维护工具时运行：
 
-原始音频不提交到仓库，只提交不可逆的频谱指纹。广告版本变化时，可以替换同一个 `id` 的 `fingerprints`，仍然不绑定任何来源。批量合并按 ID 覆盖或新增，并且整批只递增一次根节点 `revision`，供 SDK 判断规则更新顺序。
+```bash
+node --test tools/*.test.mjs
+node tools/validate-rules.mjs rules.json
+```
+
+批量合并按 ID 覆盖或新增，并且只把目标 `revision` 递增一次。同 ID 的传入规则携带 `test` 时覆盖测试元数据；不携带 `test` 时，规则内容相同则保留旧元数据，内容变化则清除旧元数据。候选校验失败不会改写目标文件，成功后通过同目录原子替换发布。
 
 ## 集成地址
 
-稳定分支的规则地址：
+稳定 `rules` 分支的真实地址：
 
 ```text
-https://raw.githubusercontent.com/<owner>/<repo>/main/rules.json
+https://raw.githubusercontent.com/0o755/m3u8-ad-audio-probe/rules/rules.json
 ```
 
-SDK 应使用本地缓存和 ETag，规则下载失败时继续使用上一次有效规则，不能影响播放器正常播放。
+SDK 应使用本地缓存和条件请求；下载或新版本校验失败时继续使用上一次有效规则，不能影响宿主播放。
 
-## 兼容性约束
+## 合同摘要
 
-- 只接受 `schemaVersion: 3` 和 `spectral-sequence-v3`，不存在旧规则读取或迁移逻辑。
-- 算法参数固定为 16000Hz、512ms 窗口、256ms hop 和 16 个频带。
-- 完整时长为 1 秒至 10 分钟，开头锚点为 2 至 5 秒且不能超出完整时长。
-- 相位偏移必须唯一并包含 `offsetMs: 0`；每个哈希必须是 8 位小写十六进制。
-- 每个相位的哈希数量必须与锚点时长严格一致，且开头 8 帧内必须具备足够区分度。
-- 规则 ID 必须唯一；规则总数和哈希总量受限，避免异常文件拖垮集成方进程。
-- `testUrls` 可省略；存在时只能引用当前规则 ID，每个值最多 8192 字符，全部 URL 的 UTF-8 总量不得超过 4 MiB。
-- `testPositionsMs` 可省略；存在时只能引用当前规则 ID，值必须是 0 至 JavaScript 安全整数上限内的毫秒整数。
+- 文件必须是严格 UTF-8，可带 BOM，非空且不超过 4 MiB。
+- JSON 拒绝重复字段、未知字段、非普通十进制整数和尾随内容。
+- 规则 ID 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$` 且全局唯一。
+- 算法固定为 16000 Hz、512 ms 窗口、256 ms hop 和 16 个频带。
+- 广告时长为 1 秒至 10 分钟，锚点为 2 至 5 秒且必须完整位于广告内。
+- 四相位哈希数严格使用 `floor((anchorDurationMs - phaseMs - 512) / 256) + 1`。
+- 每个相位前八帧内必须有一帧与首帧的 Hamming 距离大于 5。
+- 相同或包含的零相位前缀必须推导出相同的 `durationMs - anchorOffsetMs`。
+- `test.url` 只接受最长 8192 字符的 HTTP(S) URL；`adStartMs + durationMs` 不得超过安全整数上限。

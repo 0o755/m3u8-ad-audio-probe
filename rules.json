@@ -1,12 +1,7 @@
 {
-  "schemaVersion": 3,
+  "format": "ad-audio-probe-rules",
+  "schemaVersion": 1,
   "revision": 1,
-  "algorithm": {
-    "id": "spectral-sequence-v3",
-    "sampleRate": 16000,
-    "windowMs": 512,
-    "hopMs": 256,
-    "bandCount": 16
-  },
+  "algorithm": "spectral-sequence-v1",
   "rules": []
 }

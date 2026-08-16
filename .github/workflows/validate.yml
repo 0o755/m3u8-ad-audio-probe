@@ -22,4 +22,5 @@ jobs:
         with:
           node-version: 22
       - run: node --test tools/*.test.mjs
+      - run: node tools/validate-schema.mjs rule-schema.json
       - run: node tools/validate-rules.mjs rules.json

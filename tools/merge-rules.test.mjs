@@ -1,13 +1,14 @@
-/* 验证批量贡献的新增、覆盖、排序和单次修订号递增。 */
+/* 验证 v1 批量合并、嵌套 test 语义和失败不污染。 */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ALGORITHM, MAX_REVISION } from "./rule-contract.mjs";
+import { ALGORITHM, FORMAT, MAX_REVISION } from "./rule-contract.mjs";
+import { mergeRuleFiles } from "./merge-rule.mjs";
 import { mergeDocuments } from "./merge-rules.mjs";
 
-test("整批新增和覆盖只递增一次 revision", () => {
+test("整批新增和覆盖按目标 revision 只递增一次", () => {
   const target = documentOf(7, [rule("keep", "ffffffff"), rule("replace", "ffffff00")]);
   const originalTarget = structuredClone(target);
-  const contribution = documentOf(1, [
+  const contribution = documentOf(99, [
     rule("replace", "ffff0000", 30_000),
     rule("added", "ff000000"),
   ]);
@@ -21,111 +22,124 @@ test("整批新增和覆盖只递增一次 revision", () => {
   assert.deepEqual(target, originalTarget);
 });
 
-test("拒绝空的批量贡献文件", () => {
-  assert.throws(() => mergeDocuments(documentOf(1, [rule("keep", "ffffffff")]),
-    documentOf(1, [])), /没有可合并/);
+test("传入 test 时覆盖旧测试元数据", () => {
+  const targetRule = withTest(rule("same"), "https://example.com/old.m3u8", 1_000);
+  const incoming = withTest(rule("same"), "https://example.com/new.m3u8", 2_000);
+
+  const result = mergeDocuments(documentOf(1, [targetRule]), documentOf(1, [incoming]));
+
+  assert.deepEqual(result.document.rules[0].test, incoming.test);
 });
 
-test("合并时保留贡献规则携带的测试链接", () => {
-  const target = documentOf(1, [rule("keep", "ffffffff")]);
-  const contribution = documentOf(1, [rule("linked", "ffffff00")]);
-  contribution.testUrls = { linked: "https://example.com/linked.m3u8" };
-
-  const result = mergeDocuments(target, contribution);
-
-  assert.equal(result.document.testUrls.linked, "https://example.com/linked.m3u8");
-});
-
-test("规则覆盖时同步测试位置并清除已经失效的旧位置", () => {
-  const target = documentOf(1, [
-    rule("same", "ffffffff"),
-    rule("changed", "ffffff00"),
-    rule("incoming", "ffff0000"),
-  ]);
-  target.testPositionsMs = { same: 1_000, changed: 2_000, incoming: 3_000 };
-  const contribution = documentOf(1, [
-    rule("same", "ffffffff"),
-    rule("changed", "ff000000", 30_000),
-    rule("incoming", "ffff0000"),
-  ]);
-  contribution.testPositionsMs = { incoming: 9_000 };
-
-  const result = mergeDocuments(target, contribution);
-
-  assert.deepEqual(result.document.testPositionsMs, { same: 1_000, incoming: 9_000 });
-});
-
-test("字段顺序不同的相同规则仍保留测试元数据", () => {
-  const original = rule("same", "ffffffff");
+test("相同规则不带 test 时保留旧元数据且忽略相位顺序", () => {
+  const original = withTest(rule("same"), "https://example.com/same.m3u8", 4_000);
+  const incoming = structuredClone(original);
+  delete incoming.test;
+  incoming.fingerprints.reverse();
   const reordered = {
-    fingerprints: original.fingerprints.map((variant) => ({
-      hashes: [...variant.hashes], offsetMs: variant.offsetMs,
+    fingerprints: incoming.fingerprints.map((fingerprint) => ({
+      hashes: [...fingerprint.hashes], phaseMs: fingerprint.phaseMs,
     })),
-    anchorDurationMs: original.anchorDurationMs,
-    id: original.id,
-    anchorOffsetMs: original.anchorOffsetMs,
-    durationMs: original.durationMs,
+    anchorDurationMs: incoming.anchorDurationMs,
+    id: incoming.id,
+    anchorOffsetMs: incoming.anchorOffsetMs,
+    durationMs: incoming.durationMs,
   };
-  const target = documentOf(1, [original]);
-  target.testUrls = { same: "https://example.com/same.m3u8" };
-  target.testPositionsMs = { same: 4_000 };
 
-  const result = mergeDocuments(target, documentOf(1, [reordered]));
+  const result = mergeDocuments(documentOf(1, [original]), documentOf(1, [reordered]));
 
-  assert.deepEqual(result.document.testUrls,
-    { same: "https://example.com/same.m3u8" });
-  assert.deepEqual(result.document.testPositionsMs, { same: 4_000 });
+  assert.deepEqual(result.document.rules[0].test, original.test);
 });
 
-test("拒绝递增已经达到安全上限的 revision", () => {
-  const target = documentOf(MAX_REVISION, [rule("keep", "ffffffff")]);
-  const originalTarget = structuredClone(target);
+test("规则内容变化且不带 test 时清除旧元数据", () => {
+  const original = withTest(rule("changed"), "https://example.com/old.m3u8", 3_000);
+  const incoming = rule("changed", "ffffff00", 30_000);
 
-  assert.throws(() => mergeDocuments(target,
-    documentOf(1, [rule("added", "ffffff00")])), /修订号已达到安全上限/);
-  assert.deepEqual(target, originalTarget);
+  const result = mergeDocuments(documentOf(1, [original]), documentOf(1, [incoming]));
+
+  assert.equal(Object.prototype.hasOwnProperty.call(result.document.rules[0], "test"), false);
 });
 
-test("候选文档校验失败时不污染目标对象", () => {
-  const target = documentOf(9, [rule("keep", "ffffffff")]);
-  const originalTarget = structuredClone(target);
-  const contribution = documentOf(1, [rule("conflict", "ffffffff", 16_000)]);
+test("拒绝空贡献和已到安全上限的目标 revision", () => {
+  const target = documentOf(1, [rule("keep")]);
+  assert.throws(() => mergeDocuments(target, documentOf(1, [])), /没有可合并/);
 
-  assert.throws(() => mergeDocuments(target, contribution), /相同开头指纹存在不同结束位置/);
-  assert.deepEqual(target, originalTarget);
+  const maxTarget = documentOf(MAX_REVISION, [rule("keep")]);
+  const original = structuredClone(maxTarget);
+  assert.throws(() => mergeDocuments(maxTarget, documentOf(1, [rule("added", "ffffff00")])),
+    /修订号已达到安全上限/);
+  assert.deepEqual(maxTarget, original);
 });
 
-test("测试链接只读取保留 ID 的自有属性", () => {
-  const target = documentOf(1, [rule("keep", "ffffffff")]);
-  const contribution = documentOf(1, [
-    rule("__proto__", "ffffff00"),
-    rule("toString", "ffff0000"),
-    rule("linked", "ff000000"),
+test("贡献或最终候选校验失败时不污染目标对象", () => {
+  const target = documentOf(9, [rule("keep")]);
+  const original = structuredClone(target);
+  const invalid = documentOf(1, [rule("Upper")]);
+  assert.throws(() => mergeDocuments(target, invalid), /ID 无效/);
+  assert.deepEqual(target, original);
+
+  const conflict = documentOf(1, [rule("conflict", "ffffffff", 16_000)]);
+  assert.throws(() => mergeDocuments(target, conflict), /相同开头指纹存在不同结束位置/);
+  assert.deepEqual(target, original);
+});
+
+test("合并 API 拒绝超过 4 MiB 的候选且不污染目标对象", () => {
+  const target = largeDocument(1, 0, 400);
+  const contribution = largeDocument(1, 400, 400);
+  const original = structuredClone(target);
+
+  assert.throws(() => mergeDocuments(target, contribution), /4 MiB/);
+  assert.deepEqual(target, original);
+});
+
+test("格式化后的最终文件超过 4 MiB 时不执行原子写", async () => {
+  const target = largeDocument(1, 0, 240);
+  const contribution = largeDocument(1, 240, 240);
+  const inputs = new Map([
+    ["target.json", Buffer.from(JSON.stringify(target))],
+    ["contribution.json", Buffer.from(JSON.stringify(contribution))],
   ]);
-  contribution.testUrls = { linked: "https://example.com/linked.m3u8" };
-  contribution.testPositionsMs = Object.fromEntries([["__proto__", 4_000]]);
+  let writes = 0;
 
-  const result = mergeDocuments(target, contribution);
-
-  assert.deepEqual(result.document.testUrls,
-    { linked: "https://example.com/linked.m3u8" });
-  assert.equal(Object.prototype.hasOwnProperty.call(
-    result.document.testPositionsMs, "__proto__"), true);
-  assert.equal(result.document.testPositionsMs.__proto__, 4_000);
+  await assert.rejects(mergeRuleFiles("target.json", "contribution.json", {
+    readFile: async (path) => inputs.get(path),
+    writeFileAtomically: async () => { writes += 1; },
+  }), /4 MiB/);
+  assert.equal(writes, 0);
 });
 
 function documentOf(revision, rules) {
-  return { schemaVersion: 3, revision, algorithm: { ...ALGORITHM }, rules };
+  return { format: FORMAT, schemaVersion: 1, revision, algorithm: ALGORITHM, rules };
 }
 
-function rule(id, secondHash, durationMs = 15_000) {
-  const hashes = Array.from({ length: 18 }, (_, index) => index === 1
-    ? secondHash : "00000000");
+function largeDocument(revision, start, count) {
+  const prefix = "https://example.com/";
+  const url = `${prefix}${"a".repeat(8192 - prefix.length)}`;
+  return documentOf(revision, Array.from({ length: count }, (_, index) => ({
+    ...rule(`large-${start + index}`), test: { url, adStartMs: 0 },
+  })));
+}
+
+function rule(id, secondHash = "ffffffff", durationMs = 15_000) {
+  const anchorDurationMs = 5_000;
   return {
     id,
     durationMs,
     anchorOffsetMs: 0,
-    anchorDurationMs: 5_000,
-    fingerprints: [{ offsetMs: 0, hashes }],
+    anchorDurationMs,
+    fingerprints: [0, 64, 128, 192].map((phaseMs) => ({
+      phaseMs,
+      hashes: hashesFor(anchorDurationMs, phaseMs, secondHash),
+    })),
   };
+}
+
+function withTest(value, url, adStartMs) {
+  return { ...value, test: { url, adStartMs } };
+}
+
+function hashesFor(anchorDurationMs, phaseMs, secondHash) {
+  const count = Math.floor((anchorDurationMs - phaseMs - 512) / 256) + 1;
+  return Array.from({ length: count }, (_, index) => index === 1
+    ? secondHash : "00000000");
 }
