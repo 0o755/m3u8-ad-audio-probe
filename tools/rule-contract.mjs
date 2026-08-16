@@ -9,12 +9,17 @@ export const ALGORITHM = Object.freeze({
 
 const MAX_RULES = 5000;
 const MAX_TOTAL_HASHES = 250000;
+const MAX_TEST_URL_BYTES = 4 * 1024 * 1024;
+export const MAX_REVISION = Number.MAX_SAFE_INTEGER;
 
 export function validateDocument(document) {
   assertRecord(document, "规则根节点");
-  assertKeys(document, ["schemaVersion", "revision", "algorithm", "rules"], "规则根节点");
+  assertKeysWithOptional(document, ["schemaVersion", "revision", "algorithm", "rules"],
+    "testUrls", "规则根节点");
   if (document.schemaVersion !== 3) throw new Error("schemaVersion 必须为 3");
-  if (!isInteger(document.revision) || document.revision < 0) throw new Error("revision 无效");
+  if (!Number.isSafeInteger(document.revision) || document.revision < 0) {
+    throw new Error("revision 无效");
+  }
   validateAlgorithm(document.algorithm);
   if (!Array.isArray(document.rules) || document.rules.length > MAX_RULES) {
     throw new Error("rules 不是数组或数量超过上限");
@@ -29,6 +34,7 @@ export function validateDocument(document) {
     if (totalHashes > MAX_TOTAL_HASHES) throw new Error("规则指纹总量超过上限");
   }
   validateAmbiguousPrefixes(document.rules);
+  validateTestUrls(document.testUrls, ids);
   return document;
 }
 
@@ -91,15 +97,77 @@ function validateVariant(rule, variant, offsets) {
 }
 
 function validateAmbiguousPrefixes(rules) {
-  const prefixes = new Map();
+  const root = createPrefixNode();
   for (const rule of rules) {
     const primary = rule.fingerprints.find((item) => item.offsetMs === 0);
-    const prefix = primary.hashes.slice(0, 8).join(":");
-    const previous = prefixes.get(prefix);
-    if (previous && previous.durationMs !== rule.durationMs) {
-      throw new Error(`相同开头指纹存在不同时长：${previous.id} / ${rule.id}`);
+    const hashes = primary.hashes.slice(0, 8);
+    const endpoint = endpointOffset(rule);
+    const path = [];
+    let node = root;
+    for (const hash of hashes) {
+      if (node.terminal && node.terminal.endpoint !== endpoint) {
+        throw prefixConflict(node.terminal.ruleId, rule.id);
+      }
+      if (!node.children.has(hash)) node.children.set(hash, createPrefixNode());
+      node = node.children.get(hash);
+      path.push(node);
     }
-    prefixes.set(prefix, rule);
+    if (node.subtreeEndpoint !== null
+        && (node.subtreeMixed || node.subtreeEndpoint !== endpoint)) {
+      const previous = node.subtreeEndpoint !== endpoint
+        ? node.subtreeRuleId : node.mixedRuleId;
+      throw prefixConflict(previous, rule.id);
+    }
+    node.terminal = { endpoint, ruleId: rule.id };
+    for (const item of path) {
+      if (item.subtreeEndpoint === null) {
+        item.subtreeEndpoint = endpoint;
+        item.subtreeRuleId = rule.id;
+      } else if (item.subtreeEndpoint !== endpoint) {
+        item.subtreeMixed = true;
+        if (item.mixedRuleId === null) item.mixedRuleId = rule.id;
+      }
+    }
+  }
+}
+
+function createPrefixNode() {
+  return {
+    children: new Map(), terminal: null,
+    subtreeEndpoint: null, subtreeRuleId: null, mixedRuleId: null, subtreeMixed: false,
+  };
+}
+
+function prefixConflict(left, right) {
+  return new Error(`相同开头指纹存在不同结束位置：${left} / ${right}`);
+}
+
+function endpointOffset(rule) {
+  return rule.durationMs - rule.anchorOffsetMs;
+}
+
+function validateTestUrls(value, ids) {
+  if (value === undefined) return;
+  assertRecord(value, "testUrls");
+  const entries = Object.entries(value);
+  if (entries.length > ids.size) throw new Error("测试链接数量超过规则数量");
+  let totalBytes = 0;
+  const encoder = new TextEncoder();
+  for (const [id, raw] of entries) {
+    if (!ids.has(id) || typeof raw !== "string" || raw.length === 0
+        || raw.length > 8192 || raw !== raw.trim()) {
+      throw new Error(`测试链接无效：${id}`);
+    }
+    totalBytes += encoder.encode(raw).byteLength;
+    if (totalBytes > MAX_TEST_URL_BYTES) throw new Error("测试链接总量超过 4 MiB");
+    try {
+      const url = new URL(raw);
+      if ((url.protocol !== "http:" && url.protocol !== "https:") || url.host === "") {
+        throw new Error("protocol");
+      }
+    } catch {
+      throw new Error(`测试链接必须是 HTTP(S) 地址：${id}`);
+    }
   }
 }
 
@@ -139,6 +207,12 @@ function assertKeys(value, expected, label) {
   if (actual.length !== expected.length || actual.some((key) => !allowed.has(key))) {
     throw new Error(`${label}字段不符合 schemaVersion 3`);
   }
+}
+
+function assertKeysWithOptional(value, required, optional, label) {
+  const expected = Object.prototype.hasOwnProperty.call(value, optional)
+    ? [...required, optional] : required;
+  assertKeys(value, expected, label);
 }
 
 function isInteger(value) {

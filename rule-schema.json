@@ -5,7 +5,11 @@
   "required": ["schemaVersion", "revision", "algorithm", "rules"],
   "properties": {
     "schemaVersion": { "type": "integer", "const": 3 },
-    "revision": { "type": "integer", "minimum": 0 },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "algorithm": {
       "type": "object",
       "required": ["id", "sampleRate", "windowMs", "hopMs", "bandCount"],
@@ -50,6 +54,17 @@
           }
         },
         "additionalProperties": false
+      }
+    },
+    "testUrls": {
+      "type": "object",
+      "description": "全部 URL 的 UTF-8 总量不得超过 4 MiB（由发布校验器执行）",
+      "maxProperties": 5000,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192,
+        "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
       }
     }
   },
