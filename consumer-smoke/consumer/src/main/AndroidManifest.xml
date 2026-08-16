@@ -1,0 +1,7 @@
+<!-- 独立消费者以最小应用验证最终 D8/R8，不复制 SDK 内部权限。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:label="Probe Consumer Smoke"
+        android:supportsRtl="true" />
+</manifest>

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/0o755/m3u8-ad-audio-probe/raw/main/docs/rules-v1.schema.json",
+  "title": "Ad Audio Probe Rules v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schemaVersion", "revision", "algorithm", "rules"],
+  "properties": {
+    "format": { "const": "ad-audio-probe-rules" },
+    "schemaVersion": { "const": 1 },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "algorithm": { "const": "spectral-sequence-v1" },
+    "rules": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "durationMs",
+        "anchorOffsetMs",
+        "anchorDurationMs",
+        "fingerprints"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        },
+        "anchorOffsetMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchorDurationMs": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 5000
+        },
+        "test": { "$ref": "#/$defs/test" },
+        "fingerprints": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/fingerprint" },
+          "allOf": [
+            { "contains": { "properties": { "phaseMs": { "const": 0 } } }, "minContains": 1, "maxContains": 1 },
+            { "contains": { "properties": { "phaseMs": { "const": 64 } } }, "minContains": 1, "maxContains": 1 },
+            { "contains": { "properties": { "phaseMs": { "const": 128 } } }, "minContains": 1, "maxContains": 1 },
+            { "contains": { "properties": { "phaseMs": { "const": 192 } } }, "minContains": 1, "maxContains": 1 }
+          ]
+        }
+      }
+    },
+    "test": {
+      "type": "object",
+      "description": "仅供规则制作和复测工具使用；运行时匹配器忽略该对象。",
+      "additionalProperties": false,
+      "required": ["url", "adStartMs"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "format": "uri",
+          "pattern": "^[hH][tT][tT][pP][sS]?://"
+        },
+        "adStartMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "还必须满足 adStartMs + 所属规则 durationMs 不超过 JavaScript 安全整数上限。"
+        }
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phaseMs", "hashes"],
+      "properties": {
+        "phaseMs": { "enum": [0, 64, 128, 192] },
+        "hashes": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}$"
+          }
+        }
+      }
+    }
+  }
+}

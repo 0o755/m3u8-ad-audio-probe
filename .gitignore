@@ -1,0 +1,12 @@
+# Gradle 与 Android 构建产物
+.gradle/
+build/
+**/build/
+local.properties
+.idea/
+*.iml
+
+# 系统文件与发布密钥
+.DS_Store
+*.jks
+*.keystore

@@ -1,0 +1,19 @@
+# 依赖版本集中管理，避免 Media3 组件混用不同版本。
+[versions]
+agp = "8.13.2"
+media3 = "1.9.2"
+junit = "4.13.2"
+gson = "2.11.0"
+annotation = "1.6.0"
+mavenPublish = "0.34.0"
+
+[libraries]
+media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
+media3-hls = { module = "androidx.media3:media3-exoplayer-hls", version.ref = "media3" }
+junit = { module = "junit:junit", version.ref = "junit" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }

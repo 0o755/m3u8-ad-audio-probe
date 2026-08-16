@@ -1,0 +1,175 @@
+# M3U8 Ad Audio Probe
+
+面向普通 HLS/M3U8 与 MP4 点播的 Android 无头广告音频探针。SDK 内部只解码音频并匹配 `rules.json`，宿主不再采集、转换或传递 PCM。
+
+## 能力边界
+
+- 支持：有限时长的 HLS VOD、普通 MP4、HTTP(S) 请求头、宿主主动拖动/换源。
+- 不支持：直播、DRM、DASH、RTSP、服务端动态插入且两次请求内容不一致的流。
+- 探针 fail-open：规则或媒体分析失败不会暂停、静音或操作宿主播放器。
+- SDK 不直接 seek。只有宿主进入已确认广告区间时，才回调一次 `SkipRequest`。
+
+## 依赖
+
+发布到 Maven Central 后，宿主只需一行依赖：
+
+```kotlin
+implementation("io.github.0o755:ad-audio-probe:0.1.0")
+```
+
+当前预发布包先进入 GitHub Packages。GitHub Packages 仍要求宿主配置仓库地址和读取凭据，因此不把它宣传成“一行接入”；真正的一行依赖以 Maven Central 正式版本为准。源码调试可直接 `includeBuild` 或依赖 `project(":probe")`。
+
+首版锁定 Media3 `1.9.2`。公共 API 不含 Media3 类型，但宿主若强制使用其他 Media3 版本，Gradle 会明确报告版本冲突，避免运行期混版崩溃。
+
+## 规则格式
+
+新 SDK 只接受独立的 Probe Rules v1，不兼容旧 SDK 的规则文件。根节点固定为：
+
+```json
+{
+  "format": "ad-audio-probe-rules",
+  "schemaVersion": 1,
+  "revision": 1,
+  "algorithm": "spectral-sequence-v1",
+  "rules": []
+}
+```
+
+规则存在于 JSON 中就表示启用，不再维护“待验证/已启用”状态。每条规则可以携带新的 `test` 元数据，供采集器保存测试链接和广告起点；Probe 会严格校验但不参与匹配。权威语义约束见 [规则合同](docs/RULES.md)，[JSON Schema](docs/rules-v1.schema.json) 负责通用结构校验，另有一份 [示例文件](docs/rules-v1.example.json)。文件最大 4 MiB、最多 1024 条规则；同一 URL 的 `revision` 必须单调递增。
+
+旧版 APK 和规则仓库生成的 schema v3 文件不能直接交给 Probe；采集器与公共规则仓库需要按 Probe Rules v1 重新生成。这里是有意断代，不保留旧启用状态或兼容转换层。
+
+## 最小接入
+
+```java
+probe = AdAudioProbe.create(
+        context,
+        "https://example.com/rules.json",
+        player::getCurrentPosition,
+        request -> player.seekTo(request.getSeekTargetPositionMs()));
+
+// 每次宿主开始播放新链接时调用。
+probe.open(playUrl);
+```
+
+这就是完整的基础接入。SDK 在主线程读取 `player::getCurrentPosition`，内部建立独立的 audio-only 探针，提前分析最多 15 秒；宿主进入广告区间后收到跳转请求。
+
+Probe 应只在实际播放进程初始化。首版会协调同一进程中的多个实例，但不支持多个 Android 进程同时刷新同一个规则 URL。
+
+宿主销毁时释放：
+
+```java
+probe.close();
+```
+
+宿主发生手动 seek、切集或播放器时间轴重建时，建议立即通知：
+
+```java
+probe.notifyHostDiscontinuity(player.getCurrentPosition());
+```
+
+不调用也会由位置轮询发现明显跳变，但显式通知能更快取消旧会话结果。
+
+## 带请求头的媒体
+
+```java
+probe.open(ProbeMedia.builder(playUrl)
+        .setId(episodeId)
+        .setType(ProbeMedia.Type.HLS)
+        .setHeader("User-Agent", userAgent)
+        .setHeader("Referer", referer)
+        .build());
+```
+
+`ProbeMedia.Type.AUTO` 只根据 URL path 是否以 `.m3u8` 结尾选择 HLS，否则按 MP4 处理。无扩展名或通过查询参数区分的 HLS 必须显式设置 `Type.HLS`。HTTP 明文媒体是否可访问由宿主应用的 Network Security Config 决定，SDK 不放宽全局安全策略。
+
+## 跳转数据
+
+`SkipRequest` 是在当前连续分析水位内完成冲突确认后提交的不可变决定，包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `requestId` | 全局递增请求 ID |
+| `sessionId` | 当前媒体代际，换源或时间轴跳变后改变 |
+| `mediaId` | 宿主提供的媒体 ID |
+| `ruleId` / `ruleRevision` | 命中的规则与规则版本 |
+| `adStartPositionMs` / `adEndPositionMs` | 广告在媒体时间轴上的完整区间 |
+| `seekTargetPositionMs` | 宿主应跳转到的位置，首版等于广告结束位置 |
+| `hostPositionMsAtDispatch` | 回调前二次读取的宿主位置 |
+| `analyzedThroughPositionMs` | 探针已经连续分析到的位置 |
+| `matchSimilarity` | 0 到 1 的确认帧平均 Hamming 相似度，不是概率 |
+
+SDK 不会提前派发未来跳转。回调真正执行前会再次检查会话、规则版本、启用状态和宿主位置；旧链接排队中的请求会自动失效。
+
+跳转请求采用一次性 fail-open：若宿主回调抛出异常，SDK 会报告结构化错误但不会循环重试和反复操作播放器。异步 seek 最终是否成功仍由宿主播放器负责。
+
+## 高级配置
+
+```java
+probe = AdAudioProbe.builder(context, rulesUrl)
+        .setPlaybackClock(player::getCurrentPosition)
+        .setListener(new ProbeListener() {
+            @Override
+            public void onSkipRequested(SkipRequest request) {
+                player.seekTo(request.getSeekTargetPositionMs());
+            }
+
+            @Override
+            public void onStatusChanged(ProbeStatus status) {
+                // 可选：观察准备、分析、前视就绪、结束等状态。
+            }
+
+            @Override
+            public void onError(ProbeError error) {
+                // 可选：记录结构化错误；宿主播放不受影响。
+            }
+        })
+        .setMaxLookaheadMs(15_000L)
+        .build();
+```
+
+公开控制方法：
+
+- `open(String)` / `open(ProbeMedia)`：原子替换当前媒体，返回新 `sessionId`。
+- `notifyHostDiscontinuity(long)`：宿主时间轴跳变并废弃旧结果。
+- `setEnabled(boolean)`：关闭时释放当前分析，重新启用后按当前媒体新建会话。
+- `refreshRules()`：后台刷新规则；永不降级到更低 revision。
+- `stop()`：停止当前媒体，保留规则缓存和 SDK 实例。
+- `getStatus()`：随时读取不可变状态快照。
+- `close()`：永久释放，幂等；返回后不会再调用宿主监听器。
+
+所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证旧媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
+
+## 实现与体积
+
+探针使用一个 `MediaCodecAudioRenderer` 和自定义无声 `AudioSink`：
+
+- 不创建 Surface、视频 Renderer、AudioTrack 或音频焦点。
+- 解码 PCM 带真实 presentation timestamp，直接在 SDK 内同步匹配。
+- 达到前视上限后暂停内部播放器，宿主追上后再恢复。
+- MP4 只注册标准 MP4/fMP4 extractor；HLS 保留 TS、fMP4 和常见 AAC 兼容性。
+
+独立音频 rendition 的 HLS 通常只下载音频；如果 HLS 分片本身复用音视频，探针仍需读取完整分片，可能与宿主产生接近一次额外流量。片头广告也必须先完成最小帧数的网络获取和解码，不能在首个字节到达前凭空预知。
+
+Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前 Probe AAR 自身约 57 KiB；没有直接 Media3 依赖、开启 Release R8 且强制保留完整 Probe 调用链的独立烟测 APK 约 580 KiB。真实宿主的增量仍取决于已有依赖和 R8 结果，应以应用自己的 Release APK 差值为准。
+
+当前 `0.1.x` 是预发布线。JVM 状态机、lint、AAR、Maven 传递依赖和 Release R8 已纳入 CI；正式宣称稳定前仍需完成 API 23/29/35 真机的 AAC-TS HLS、fMP4 HLS、普通 MP4、seek/回退与 ENDED 恢复测试。
+
+## 构建
+
+要求 JDK 17、Android SDK 35：
+
+```bash
+./gradlew test lintRelease assembleRelease publishToMavenLocal
+./gradlew -p consumer-smoke :consumer:assembleRelease
+```
+
+## 发布
+
+`vX.Y.Z` 标签会先执行测试、lint、本地 Maven 发布和独立 Release/R8 消费验证，然后由两个独立 job 分别发布 GitHub Packages 与 Maven Central，单个发布端失败时可以单独重跑。Central Portal 需要在仓库中配置 `MAVEN_CENTRAL_USERNAME`、`MAVEN_CENTRAL_PASSWORD`、`SIGNING_KEY` 和 `SIGNING_PASSWORD` 四个 Secrets，并预先验证 `io.github.0o755` namespace。签名只在正式发布任务启用，不影响本地构建和 PR。
+
+核心设计和安全状态机见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## License
+
+MIT

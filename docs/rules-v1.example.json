@@ -1,0 +1,36 @@
+{
+  "format": "ad-audio-probe-rules",
+  "schemaVersion": 1,
+  "revision": 1,
+  "algorithm": "spectral-sequence-v1",
+  "rules": [
+    {
+      "id": "sample-ad",
+      "durationMs": 2000,
+      "anchorOffsetMs": 0,
+      "anchorDurationMs": 2000,
+      "test": {
+        "url": "https://example.com/video.m3u8",
+        "adStartMs": 120000
+      },
+      "fingerprints": [
+        {
+          "phaseMs": 0,
+          "hashes": ["1234abcd", "fedc4321", "1234abcd", "1234abcd", "1234abcd", "1234abcd"]
+        },
+        {
+          "phaseMs": 64,
+          "hashes": ["1234abcd", "fedc4321", "1234abcd", "1234abcd", "1234abcd", "1234abcd"]
+        },
+        {
+          "phaseMs": 128,
+          "hashes": ["1234abcd", "fedc4321", "1234abcd", "1234abcd", "1234abcd", "1234abcd"]
+        },
+        {
+          "phaseMs": 192,
+          "hashes": ["1234abcd", "fedc4321", "1234abcd", "1234abcd", "1234abcd", "1234abcd"]
+        }
+      ]
+    }
+  ]
+}
