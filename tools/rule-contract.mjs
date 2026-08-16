@@ -15,7 +15,7 @@ export const MAX_REVISION = Number.MAX_SAFE_INTEGER;
 export function validateDocument(document) {
   assertRecord(document, "规则根节点");
   assertKeysWithOptional(document, ["schemaVersion", "revision", "algorithm", "rules"],
-    "testUrls", "规则根节点");
+    ["testUrls", "testPositionsMs"], "规则根节点");
   if (document.schemaVersion !== 3) throw new Error("schemaVersion 必须为 3");
   if (!Number.isSafeInteger(document.revision) || document.revision < 0) {
     throw new Error("revision 无效");
@@ -35,6 +35,7 @@ export function validateDocument(document) {
   }
   validateAmbiguousPrefixes(document.rules);
   validateTestUrls(document.testUrls, ids);
+  validateTestPositions(document.testPositionsMs, ids);
   return document;
 }
 
@@ -171,6 +172,19 @@ function validateTestUrls(value, ids) {
   }
 }
 
+// 测试位置用于从广告前方开始复测，不参与规则匹配和身份判断。
+function validateTestPositions(value, ids) {
+  if (value === undefined) return;
+  assertRecord(value, "testPositionsMs");
+  const entries = Object.entries(value);
+  if (entries.length > ids.size) throw new Error("测试位置数量超过规则数量");
+  for (const [id, positionMs] of entries) {
+    if (!ids.has(id) || !Number.isSafeInteger(positionMs) || positionMs < 0) {
+      throw new Error(`测试位置无效：${id}`);
+    }
+  }
+}
+
 function requiredConfirmationFrames(hashes) {
   const first = Number.parseInt(hashes[0], 16) | 0;
   for (let index = 1; index < Math.min(8, hashes.length); index += 1) {
@@ -210,8 +224,8 @@ function assertKeys(value, expected, label) {
 }
 
 function assertKeysWithOptional(value, required, optional, label) {
-  const expected = Object.prototype.hasOwnProperty.call(value, optional)
-    ? [...required, optional] : required;
+  const expected = [...required, ...optional.filter((field) =>
+    Object.prototype.hasOwnProperty.call(value, field))];
   assertKeys(value, expected, label);
 }
 

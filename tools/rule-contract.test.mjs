@@ -70,6 +70,26 @@ test("接受与规则 ID 绑定的 HTTP 测试链接", () => {
   assert.equal(validateDocument(document), document);
 });
 
+test("接受与规则 ID 绑定的安全整数测试位置", () => {
+  const document = validDocument();
+  document.testPositionsMs = { "test-ad": Number.MAX_SAFE_INTEGER };
+
+  assert.equal(validateDocument(document), document);
+});
+
+test("拒绝未知规则、负数、分数或不安全整数测试位置", () => {
+  for (const testPositionsMs of [
+    { unknown: 1_000 },
+    { "test-ad": -1 },
+    { "test-ad": 1.5 },
+    { "test-ad": Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const document = validDocument();
+    document.testPositionsMs = testPositionsMs;
+    assert.throws(() => validateDocument(document), /测试位置无效/);
+  }
+});
+
 test("拒绝未知规则或本地协议的测试链接", () => {
   const unknown = validDocument();
   unknown.testUrls = { unknown: "https://example.com/video.m3u8" };

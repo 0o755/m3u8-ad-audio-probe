@@ -36,6 +36,47 @@ test("合并时保留贡献规则携带的测试链接", () => {
   assert.equal(result.document.testUrls.linked, "https://example.com/linked.m3u8");
 });
 
+test("规则覆盖时同步测试位置并清除已经失效的旧位置", () => {
+  const target = documentOf(1, [
+    rule("same", "ffffffff"),
+    rule("changed", "ffffff00"),
+    rule("incoming", "ffff0000"),
+  ]);
+  target.testPositionsMs = { same: 1_000, changed: 2_000, incoming: 3_000 };
+  const contribution = documentOf(1, [
+    rule("same", "ffffffff"),
+    rule("changed", "ff000000", 30_000),
+    rule("incoming", "ffff0000"),
+  ]);
+  contribution.testPositionsMs = { incoming: 9_000 };
+
+  const result = mergeDocuments(target, contribution);
+
+  assert.deepEqual(result.document.testPositionsMs, { same: 1_000, incoming: 9_000 });
+});
+
+test("字段顺序不同的相同规则仍保留测试元数据", () => {
+  const original = rule("same", "ffffffff");
+  const reordered = {
+    fingerprints: original.fingerprints.map((variant) => ({
+      hashes: [...variant.hashes], offsetMs: variant.offsetMs,
+    })),
+    anchorDurationMs: original.anchorDurationMs,
+    id: original.id,
+    anchorOffsetMs: original.anchorOffsetMs,
+    durationMs: original.durationMs,
+  };
+  const target = documentOf(1, [original]);
+  target.testUrls = { same: "https://example.com/same.m3u8" };
+  target.testPositionsMs = { same: 4_000 };
+
+  const result = mergeDocuments(target, documentOf(1, [reordered]));
+
+  assert.deepEqual(result.document.testUrls,
+    { same: "https://example.com/same.m3u8" });
+  assert.deepEqual(result.document.testPositionsMs, { same: 4_000 });
+});
+
 test("拒绝递增已经达到安全上限的 revision", () => {
   const target = documentOf(MAX_REVISION, [rule("keep", "ffffffff")]);
   const originalTarget = structuredClone(target);
@@ -62,11 +103,15 @@ test("测试链接只读取保留 ID 的自有属性", () => {
     rule("linked", "ff000000"),
   ]);
   contribution.testUrls = { linked: "https://example.com/linked.m3u8" };
+  contribution.testPositionsMs = Object.fromEntries([["__proto__", 4_000]]);
 
   const result = mergeDocuments(target, contribution);
 
   assert.deepEqual(result.document.testUrls,
     { linked: "https://example.com/linked.m3u8" });
+  assert.equal(Object.prototype.hasOwnProperty.call(
+    result.document.testPositionsMs, "__proto__"), true);
+  assert.equal(result.document.testPositionsMs.__proto__, 4_000);
 });
 
 function documentOf(revision, rules) {

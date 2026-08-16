@@ -11,6 +11,7 @@ export function mergeDocuments(target, contribution) {
   let replaced = 0;
   const candidate = structuredClone(target);
   const testUrls = new Map(Object.entries(candidate.testUrls ?? {}));
+  const testPositions = new Map(Object.entries(candidate.testPositionsMs ?? {}));
   const indexes = new Map(candidate.rules.map((rule, index) => [rule.id, index]));
   for (const incoming of contribution.rules) {
     const index = indexes.get(incoming.id);
@@ -24,17 +25,39 @@ export function mergeDocuments(target, contribution) {
       candidate.rules[index] = incomingCopy;
       replaced += 1;
     }
+    const contentChanged = previous !== undefined && !sameRule(previous, incoming);
     const hasIncomingUrl = contribution.testUrls !== undefined
       && Object.prototype.hasOwnProperty.call(contribution.testUrls, incoming.id);
     if (hasIncomingUrl) testUrls.set(incoming.id, contribution.testUrls[incoming.id]);
-    else if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(incoming)) {
-      testUrls.delete(incoming.id);
-    }
+    else if (contentChanged) testUrls.delete(incoming.id);
+    const hasIncomingPosition = contribution.testPositionsMs !== undefined
+      && Object.prototype.hasOwnProperty.call(contribution.testPositionsMs, incoming.id);
+    if (hasIncomingPosition) {
+      testPositions.set(incoming.id, contribution.testPositionsMs[incoming.id]);
+    } else if (contentChanged) testPositions.delete(incoming.id);
   }
   candidate.rules.sort((left, right) => left.id.localeCompare(right.id));
   if (testUrls.size === 0) delete candidate.testUrls;
   else candidate.testUrls = Object.fromEntries(testUrls);
+  if (testPositions.size === 0) delete candidate.testPositionsMs;
+  else candidate.testPositionsMs = Object.fromEntries(testPositions);
   candidate.revision += 1;
   validateDocument(candidate);
   return { document: candidate, added, replaced };
+}
+
+/** JSON 字段顺序不属于规则内容，测试元数据只随真实规则变化失效。 */
+function sameRule(left, right) {
+  if (left.id !== right.id || left.durationMs !== right.durationMs
+      || left.anchorOffsetMs !== right.anchorOffsetMs
+      || left.anchorDurationMs !== right.anchorDurationMs
+      || left.fingerprints.length !== right.fingerprints.length) {
+    return false;
+  }
+  return left.fingerprints.every((variant, index) => {
+    const other = right.fingerprints[index];
+    return other !== undefined && variant.offsetMs === other.offsetMs
+      && variant.hashes.length === other.hashes.length
+      && variant.hashes.every((hash, hashIndex) => hash === other.hashes[hashIndex]);
+  });
 }
