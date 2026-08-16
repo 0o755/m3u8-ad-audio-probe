@@ -6,11 +6,19 @@ import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
 import com.google.gson.stream.MalformedJsonException;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.PushbackInputStream;
 import java.io.Reader;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -21,6 +29,7 @@ import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
 import io.github.fongmi.adaudio.probe.internal.core.FingerprintVariant;
 
 public final class RuleSetJsonParser {
+    public static final int MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
     private static final Pattern HASH_PATTERN = Pattern.compile("^[0-9a-f]{8}$");
     private static final Pattern INTEGER_PATTERN = Pattern.compile("^-?(0|[1-9][0-9]*)$");
     private static final int MAX_HASHES_PER_VARIANT = 64;
@@ -29,6 +38,37 @@ public final class RuleSetJsonParser {
     private static final int[] REQUIRED_PHASES_MS = {0, 64, 128, 192};
 
     private RuleSetJsonParser() {
+    }
+
+    /** 检查上限后复制调用方字节，避免异步解析期间被外部修改。 */
+    public static byte[] copyDocument(byte[] source) {
+        if (source == null) throw new IllegalArgumentException("规则输入不能为空");
+        if (source.length == 0) throw new IllegalArgumentException("规则内容不能为空");
+        if (source.length > MAX_DOCUMENT_BYTES) {
+            throw new IllegalArgumentException("规则超过 4 MiB");
+        }
+        return Arrays.copyOf(source, source.length);
+    }
+
+    /** 在分配 UTF-8 字节前计算准确大小，并拒绝不成对的 UTF-16 代理项。 */
+    public static byte[] encodeDocument(String source) {
+        if (source == null) throw new IllegalArgumentException("规则输入不能为空");
+        int byteCount = utf8Length(source);
+        if (byteCount == 0) throw new IllegalArgumentException("规则内容不能为空");
+        if (byteCount > MAX_DOCUMENT_BYTES) {
+            throw new IllegalArgumentException("规则超过 4 MiB");
+        }
+        return source.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** 从严格 UTF-8 字节解析 Probe rules-v1。 */
+    public static AdRuleSet parseUtf8(byte[] source) throws IOException {
+        byte[] owned = copyDocument(source);
+        try (Reader reader = openUtf8Reader(new ByteArrayInputStream(owned))) {
+            return parse(reader);
+        } catch (CharacterCodingException error) {
+            throw new IllegalArgumentException("规则文件不是严格 UTF-8", error);
+        }
     }
 
     public static AdRuleSet parse(Reader source) throws IOException {
@@ -48,13 +88,50 @@ public final class RuleSetJsonParser {
                     || root.rules == null || root.revision == null) {
                 throw new IllegalArgumentException("规则根节点缺少必填字段或算法不兼容");
             }
-            require(root.revision > 0L, "远端规则 revision 必须从 1 开始");
+            require(root.revision > 0L, "规则 revision 必须从 1 开始");
             return new AdRuleSet(root.revision, AdRuleSet.SAMPLE_RATE,
                     AdRuleSet.WINDOW_MS, AdRuleSet.HOP_MS,
                     AdRuleSet.BAND_COUNT, root.rules);
         } catch (MalformedJsonException error) {
             throw new IllegalArgumentException("规则 JSON 语法无效", error);
         }
+    }
+
+    private static Reader openUtf8Reader(InputStream source) throws IOException {
+        PushbackInputStream input = new PushbackInputStream(source, 3);
+        byte[] prefix = new byte[3];
+        int read = input.read(prefix);
+        boolean bom = read == 3 && (prefix[0] & 0xff) == 0xef
+                && (prefix[1] & 0xff) == 0xbb && (prefix[2] & 0xff) == 0xbf;
+        if (!bom && read > 0) input.unread(prefix, 0, read);
+        return new InputStreamReader(input, StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT));
+    }
+
+    private static int utf8Length(String source) {
+        long bytes = 0L;
+        for (int i = 0; i < source.length(); i++) {
+            char value = source.charAt(i);
+            if (value <= 0x7f) {
+                bytes++;
+            } else if (value <= 0x7ff) {
+                bytes += 2L;
+            } else if (Character.isHighSurrogate(value)) {
+                if (i + 1 >= source.length()
+                        || !Character.isLowSurrogate(source.charAt(i + 1))) {
+                    throw new IllegalArgumentException("规则文本包含无效 Unicode 字符");
+                }
+                i++;
+                bytes += 4L;
+            } else if (Character.isLowSurrogate(value)) {
+                throw new IllegalArgumentException("规则文本包含无效 Unicode 字符");
+            } else {
+                bytes += 3L;
+            }
+            if (bytes > MAX_DOCUMENT_BYTES) return MAX_DOCUMENT_BYTES + 1;
+        }
+        return (int) bytes;
     }
 
     private static RootDocument readRoot(JsonReader reader) throws IOException {
@@ -175,8 +252,8 @@ public final class RuleSetJsonParser {
             require(scheme != null
                             && ("http".equalsIgnoreCase(scheme)
                             || "https".equalsIgnoreCase(scheme))
-                            && uri.getRawAuthority() != null
-                            && !uri.getRawAuthority().isEmpty(),
+                            && uri.getHost() != null
+                            && !uri.getHost().isEmpty(),
                     "test.url 必须是有效的 HTTP(S) URL");
         } catch (URISyntaxException error) {
             throw new IllegalArgumentException("test.url 必须是有效的 HTTP(S) URL", error);

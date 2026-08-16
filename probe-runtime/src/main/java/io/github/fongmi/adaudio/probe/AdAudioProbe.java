@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.fongmi.adaudio.probe.internal.rules.AtomicRuleRepository;
+import io.github.fongmi.adaudio.probe.internal.rules.RuleSetJsonParser;
+import io.github.fongmi.adaudio.probe.internal.rules.RuleSetSelection;
 import io.github.fongmi.adaudio.probe.internal.runtime.AdDispatchQueue.Claim;
 import io.github.fongmi.adaudio.probe.internal.runtime.ConfirmedAd;
 import io.github.fongmi.adaudio.probe.internal.runtime.CallbackGate;
@@ -51,6 +53,8 @@ public final class AdAudioProbe implements Closeable {
     private volatile ProbeStatus status = ProbeStatus.idle();
     private volatile ProbeStatus lastNotifiedStatus;
     private volatile AdRuleSet rules;
+    private AdRuleSet allRules;
+    private String testRuleId;
     private volatile boolean enabled = true;
     private volatile long activeSessionId;
     private ProbeMedia activeMedia;
@@ -83,7 +87,8 @@ public final class AdAudioProbe implements Closeable {
         engineThread = thread;
         engineHandler = handler;
         engine = sessionEngine;
-        ruleRepository.refresh();
+        if (builder.initialRules != null) ruleRepository.replace(builder.initialRules);
+        if (ruleRepository.hasRemoteSource()) ruleRepository.refresh();
     }
 
     /**
@@ -102,6 +107,11 @@ public final class AdAudioProbe implements Closeable {
     /** 创建高级配置入口；规则地址必须是有效 HTTPS URL。 */
     public static Builder builder(Context context, String ruleUrl) {
         return new Builder(context, ruleUrl);
+    }
+
+    /** 创建仅使用本地规则的高级配置入口；规则可在构建时或运行时注入。 */
+    public static Builder builder(Context context) {
+        return new Builder(context, null);
     }
 
     /**
@@ -136,7 +146,7 @@ public final class AdAudioProbe implements Closeable {
         updateStatus(start.status, true);
         requestHostPosition(start.sessionId);
         schedulePolling();
-        if (rules == null) ruleRepository.refresh();
+        if (rules == null && ruleRepository.hasRemoteSource()) ruleRepository.refresh();
         return start.sessionId;
     }
 
@@ -221,8 +231,82 @@ public final class AdAudioProbe implements Closeable {
     public void refreshRules() {
         synchronized (stateLock) {
             ensureOpenLocked();
+            if (!ruleRepository.hasRemoteSource()) {
+                throw new IllegalStateException("未配置远程规则地址");
+            }
         }
         ruleRepository.refresh();
+    }
+
+    /**
+     * 后台严格解析并原子替换本地 rules-v1。提交时会复制输入；解析失败保留旧规则，
+     * 并通过 {@link ProbeListener#onError(ProbeError)} 返回结构化错误。无论成功、失败或
+     * 被更新请求覆盖，都会通过规则替换终态回调结束一次。
+     *
+     * @return 正数请求 ID；对应唯一终态通过
+     * {@link ProbeListener#onRulesReplaced(RuleReplacementResult)} 返回
+     */
+    public long replaceRules(byte[] rulesJson) {
+        return callbackGate.update(() -> {
+            synchronized (stateLock) {
+                ensureOpenLocked();
+            }
+            return ruleRepository.replace(rulesJson);
+        });
+    }
+
+    /**
+     * 与 {@link #replaceRules(byte[])} 相同，但接收 Java 字符串并编码为严格 UTF-8。
+     *
+     * @return 可精确关联替换终态的正数请求 ID
+     */
+    public long replaceRulesJson(String rulesJson) {
+        return replaceRules(RuleSetJsonParser.encodeDocument(rulesJson));
+    }
+
+    /**
+     * 只启用指定规则进行测试，并使旧会话及其待派发跳转立即失效。
+     *
+     * @return 重建后的会话 ID；当前尚未打开媒体时返回 {@code 0}
+     * @throws IllegalStateException 规则尚未加载或探针已经关闭
+     * @throws IllegalArgumentException 规则 ID 为空或不存在
+     */
+    public long useRuleForTesting(String ruleId) {
+        RuleTransition transition = callbackGate.update(() -> {
+            RuleTransition result;
+            synchronized (stateLock) {
+                ensureOpenLocked();
+                AdRuleSet selected = RuleSetSelection.select(allRules, ruleId);
+                testRuleId = selected.getRules().get(0).getId();
+                result = createRuleTransitionLocked(selected, true);
+            }
+            stopSessionWithinGate(result.previousSessionId);
+            return result;
+        });
+        applyRuleTransition(transition);
+        return transition.sessionId;
+    }
+
+    /**
+     * 退出单规则测试并恢复当前全量规则，同时使旧会话及其待派发跳转失效。
+     *
+     * @return 重建后的会话 ID；当前尚未打开媒体时返回 {@code 0}
+     * @throws IllegalStateException 规则尚未加载或探针已经关闭
+     */
+    public long useAllRules() {
+        RuleTransition transition = callbackGate.update(() -> {
+            RuleTransition result;
+            synchronized (stateLock) {
+                ensureOpenLocked();
+                if (allRules == null) throw new IllegalStateException("广告规则尚未加载");
+                testRuleId = null;
+                result = createRuleTransitionLocked(allRules, true);
+            }
+            stopSessionWithinGate(result.previousSessionId);
+            return result;
+        });
+        applyRuleTransition(transition);
+        return transition.sessionId;
     }
 
     /** 停止当前探针会话，但保留规则缓存和实例供后续 open。 */
@@ -461,8 +545,8 @@ public final class AdAudioProbe implements Closeable {
                 true, "无法读取宿主播放器时间轴", error);
     }
 
-    private void reportError(ProbeErrorCode code, long sessionId, boolean fatal,
-                             boolean retryable, String message, Throwable cause) {
+    private ProbeError reportError(ProbeErrorCode code, long sessionId, boolean fatal,
+                                   boolean retryable, String message, Throwable cause) {
         ErrorTransition transition;
         if (fatal) {
             transition = callbackGate.update(() -> {
@@ -475,7 +559,7 @@ public final class AdAudioProbe implements Closeable {
             transition = commitError(code, sessionId, false,
                     retryable, message, cause);
         }
-        if (transition == null) return;
+        if (transition == null) return null;
 
         dispatchStatusCallback(transition.status, transition.statusChanged);
         ProbeError error = transition.error;
@@ -487,6 +571,7 @@ public final class AdAudioProbe implements Closeable {
             }
             listener.onError(error);
         });
+        return error;
     }
 
     /** 调用方决定是否持有 callbackGate；这里只在 stateLock 内提交不可变状态。 */
@@ -614,57 +699,111 @@ public final class AdAudioProbe implements Closeable {
         return command -> handler.post(command);
     }
 
+    /** 调用方持有 stateLock；规则提交与会话代际在同一临界区完成。 */
+    private RuleTransition createRuleTransitionLocked(AdRuleSet loaded,
+                                                      boolean forceRestart) {
+        long sessionId = activeSessionId;
+        long previousSessionId = 0L;
+        boolean recoveringFailedSession = status.getState() == ProbeState.FAILED
+                && status.getSessionId() == sessionId;
+        if ((forceRestart || rules != null || recoveringFailedSession)
+                && sessionId > 0L && activeMedia != null) {
+            boolean hadPosition = initialPositionKnown;
+            previousSessionId = sessionId;
+            sessionId = beginSessionLocked(activeMedia, hadPosition, hostPositionMs.get());
+        }
+        rules = loaded;
+        boolean needsClock = sessionId > 0L && !initialPositionKnown;
+        ProbeState state = sessionId > 0L ? ProbeState.PREPARING : ProbeState.IDLE;
+        String mediaId = statusMediaId(sessionId, activeMedia);
+        ProbeStatus next = new ProbeStatus(state, sessionId, mediaId,
+                hostPositionMs.get(), hostPositionMs.get(), loaded.getRevision(),
+                loaded.getRules().size(), null);
+        return new RuleTransition(previousSessionId, sessionId, needsClock, next);
+    }
+
+    /** 停用时会保留媒体供恢复，但无活动会话的公开状态不得携带媒体 ID。 */
+    static String statusMediaId(long sessionId, ProbeMedia media) {
+        return sessionId > 0L && media != null ? media.getId() : "";
+    }
+
+    private void applyRuleTransition(RuleTransition transition) {
+        updateStatus(transition.status, true);
+        long sessionId = transition.sessionId;
+        if (transition.needsClock) requestHostPosition(sessionId);
+        else engineHandler.post(() -> startEngineIfReady(sessionId));
+        if (sessionId > 0L) schedulePolling();
+    }
+
     private final class RuleListener implements AtomicRuleRepository.Listener {
         @Override
-        public void onRules(AdRuleSet loaded, boolean fromCache) {
+        public void onRules(AdRuleSet loaded, boolean fromCache, long replacementRequestId) {
+            boolean forceReplace = replacementRequestId > 0L;
             RuleTransition transition = callbackGate.update(() -> {
                 RuleTransition result;
                 synchronized (stateLock) {
                     if (closed.get()) return null;
-                    AdRuleSet previous = rules;
-                    if (previous != null && loaded.getRevision() <= previous.getRevision()) {
+                    AdRuleSet previous = allRules;
+                    if (!forceReplace && previous != null
+                            && loaded.getRevision() <= previous.getRevision()) {
                         return null;
                     }
 
-                    long sessionId = activeSessionId;
-                    long previousSessionId = 0L;
-                    boolean recoveringFailedSession = status.getState() == ProbeState.FAILED
-                            && status.getSessionId() == sessionId;
-                    if ((previous != null || recoveringFailedSession)
-                            && sessionId > 0L && activeMedia != null) {
-                        boolean hadPosition = initialPositionKnown;
-                        previousSessionId = sessionId;
-                        sessionId = beginSessionLocked(activeMedia, hadPosition,
-                                hostPositionMs.get());
+                    AdRuleSet effective = loaded;
+                    if (testRuleId != null) {
+                        if (RuleSetSelection.contains(loaded, testRuleId)) {
+                            effective = RuleSetSelection.select(loaded, testRuleId);
+                        } else {
+                            // 新规则不再含目标 ID 时恢复全量，绝不静默进入空匹配集。
+                            testRuleId = null;
+                        }
                     }
-                    rules = loaded;
-                    boolean needsClock = sessionId > 0L && !initialPositionKnown;
-                    ProbeState state = sessionId > 0L ? ProbeState.PREPARING : ProbeState.IDLE;
-                    String mediaId = activeMedia == null ? "" : activeMedia.getId();
-                    ProbeStatus next = new ProbeStatus(state, sessionId, mediaId,
-                            hostPositionMs.get(), hostPositionMs.get(), loaded.getRevision(),
-                            loaded.getRules().size(), null);
-                    result = new RuleTransition(previousSessionId, sessionId, needsClock, next);
+                    allRules = loaded;
+                    result = createRuleTransitionLocked(effective, forceReplace);
                 }
                 stopSessionWithinGate(result.previousSessionId);
                 return result;
             });
             if (transition == null) return;
-            updateStatus(transition.status, true);
-            final long currentSession = transition.sessionId;
-            if (transition.needsClock) requestHostPosition(currentSession);
-            else engineHandler.post(() -> startEngineIfReady(currentSession));
-            if (currentSession > 0L) schedulePolling();
+            applyRuleTransition(transition);
+            if (replacementRequestId > 0L) {
+                dispatchRuleReplacement(new RuleReplacementResult(replacementRequestId,
+                        RuleReplacementState.APPLIED, transition.sessionId,
+                        transition.status.getRuleRevision(), transition.status.getRuleCount(),
+                        null));
+            }
         }
 
         @Override
-        public void onFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error) {
+        public void onFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error,
+                              long replacementRequestId) {
             long sessionId = activeSessionId;
-            reportError(cacheAvailable ? code : ProbeErrorCode.RULES_UNAVAILABLE,
-                    sessionId, !cacheAvailable, true,
-                    cacheAvailable ? "规则更新失败，继续使用本地可信缓存"
-                            : "没有可用的广告规则", error);
+            ProbeErrorCode reported = cacheAvailable || code == ProbeErrorCode.RULE_PARSE_FAILED
+                    ? code : ProbeErrorCode.RULES_UNAVAILABLE;
+            String message = cacheAvailable
+                    ? "规则更新失败，继续使用当前有效规则"
+                    : code == ProbeErrorCode.RULE_PARSE_FAILED
+                    ? "本地规则未通过 rules-v1 校验" : "没有可用的广告规则";
+            ProbeError reportedError = reportError(reported,
+                    sessionId, !cacheAvailable, true, message, error);
+            if (replacementRequestId > 0L && reportedError != null) {
+                dispatchRuleReplacement(new RuleReplacementResult(replacementRequestId,
+                        RuleReplacementState.REJECTED, reportedError.getSessionId(),
+                        ruleRevision(), ruleCount(), reportedError));
+            }
         }
+
+        @Override
+        public void onReplacementSuperseded(long replacementRequestId) {
+            ProbeStatus current = status;
+            dispatchRuleReplacement(new RuleReplacementResult(replacementRequestId,
+                    RuleReplacementState.SUPERSEDED, current.getSessionId(),
+                    current.getRuleRevision(), current.getRuleCount(), null));
+        }
+    }
+
+    private void dispatchRuleReplacement(RuleReplacementResult result) {
+        executeHostCallback(() -> listener.onRulesReplaced(result));
     }
 
     private final class EngineListener implements ProbeSessionEngine.Listener {
@@ -773,6 +912,7 @@ public final class AdAudioProbe implements Closeable {
         private ProbeListener listener;
         private Executor callbackExecutor;
         private ProbeAdapterFactory adapterFactory;
+        private byte[] initialRules;
         private long maxLookaheadMs = 15_000L;
 
         private Builder(Context context, String ruleUrl) {
@@ -811,6 +951,21 @@ public final class AdAudioProbe implements Closeable {
             return this;
         }
 
+        /**
+         * 设置构建后在后台解析的本地 rules-v1 字节。输入会立即防御性复制，
+         * 且必须为不超过 4 MiB 的严格 UTF-8 JSON。
+         */
+        public Builder setInitialRules(byte[] rulesJson) {
+            initialRules = RuleSetJsonParser.copyDocument(rulesJson);
+            return this;
+        }
+
+        /** 设置构建后在后台解析的本地 rules-v1 JSON 文本。 */
+        public Builder setInitialRulesJson(String rulesJson) {
+            initialRules = RuleSetJsonParser.encodeDocument(rulesJson);
+            return this;
+        }
+
         /** 设置 3 到 60 秒的最大前视窗口，默认 15 秒。 */
         public Builder setMaxLookaheadMs(long value) {
             if (value < MIN_LOOKAHEAD_MS || value > MAX_LOOKAHEAD_MS) {
@@ -820,7 +975,7 @@ public final class AdAudioProbe implements Closeable {
             return this;
         }
 
-        /** 校验配置并创建实例；规则会在后台加载，媒体分析在首次 open 后开始。 */
+        /** 校验配置并创建实例；本地或远程规则会在后台加载，媒体分析在首次 open 后开始。 */
         public AdAudioProbe build() {
             return new AdAudioProbe(this);
         }

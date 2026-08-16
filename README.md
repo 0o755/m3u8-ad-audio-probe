@@ -21,6 +21,19 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 
 默认聚合包使用官方 Media3 `1.9.2` 适配器，并只在该适配器内严格约束 Media3；公共 runtime 和 adapter SPI 完全不依赖 Media3。宿主已经使用其他 Media3 版本时，应选择对应版本的官方适配器，或实现自己的适配器，而不是让 Gradle 静默混用不稳定接口。当前首个官方实现坐标为 `ad-audio-probe-media3-1.9.2`。
 
+默认坐标同时提供检测、可见播放和采集工具；它们也可以按需独立依赖：
+
+| 制品 | 用途 | 是否依赖 Media3 |
+| --- | --- | --- |
+| `ad-audio-probe` | 默认一行聚合包 | 运行时带入官方 1.9.2 适配器 |
+| `ad-audio-probe-runtime` | 广告检测、规则缓存与跳转安全状态机 | 否 |
+| `ad-audio-probe-player` | 可见 HLS/MP4 播放门面 | 否 |
+| `ad-audio-probe-collector-tools` | 指纹采集与 HLS 候选扫描 | 否 |
+| `ad-audio-probe-adapter-api` | 音频探针和可见播放的第三方 SPI | 否 |
+| `ad-audio-probe-media3-1.9.2` | 两套 SPI 的官方 Media3 实现 | 是，严格 1.9.2 |
+
+表中的“否”表示制品本身不绑定 Media3，不表示它能脱离媒体后端独立解码。`player` 和指纹采集在默认聚合包中会自动发现官方适配器；单独依赖这些制品时，还需要同时依赖一个官方适配器，或通过 Builder 显式注入自己的工厂。HLS 清单候选扫描不解码媒体，因此不需要播放器适配器。
+
 ## 规则格式
 
 新 SDK 只接受独立的 Probe Rules v1，不兼容旧 SDK 的规则文件。根节点固定为：
@@ -38,6 +51,22 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 规则存在于 JSON 中就表示启用，不再维护“待验证/已启用”状态。每条规则可以携带新的 `test` 元数据，供采集器保存测试链接和广告起点；Probe 会严格校验但不参与匹配。权威语义约束见 [规则合同](docs/RULES.md)，[JSON Schema](docs/rules-v1.schema.json) 负责通用结构校验，另有一份 [示例文件](docs/rules-v1.example.json)。文件最大 4 MiB、最多 1024 条规则；同一 URL 的 `revision` 必须单调递增。
 
 旧版 APK 和规则仓库生成的 schema v3 文件不能直接交给 Probe；采集器与公共规则仓库需要按 Probe Rules v1 重新生成。这里是有意断代，不保留旧启用状态或兼容转换层。
+
+### 本地规则与单规则复测
+
+采集器或离线宿主可以完全不配置远程规则 URL：
+
+```java
+probe = AdAudioProbe.builder(context)
+        .setInitialRulesJson(localRulesJson)
+        .setPlaybackClock(player::getCurrentPosition)
+        .setListener(listener)
+        .build();
+
+probe.open(playUrl);
+```
+
+运行中可调用 `replaceRules(byte[])` / `replaceRulesJson(String)` 原子替换规则，两者返回正数 `requestId`。解析在后台执行；应等待 `ProbeListener.onRulesReplaced` 收到同一 ID 的 `APPLIED`，再调用 `useRuleForTesting(ruleId)`。这在新旧文件 revision 相同时仍能精确判断提交完成；`REJECTED` 保留旧规则，`SUPERSEDED` 表示尚未解析就被更新请求覆盖。单规则测试只改变当前匹配视图并返回重建后的媒体 `sessionId`，不会修改 JSON、URL 或宿主播放器；`useAllRules()` 恢复全量规则。
 
 ## 最小接入
 
@@ -69,6 +98,47 @@ probe.notifyHostDiscontinuity(player.getCurrentPosition());
 ```
 
 不调用也会由位置轮询发现明显跳变，但显式通知能更快取消旧会话结果。
+
+## 可见播放器
+
+采集器无需直接依赖 Media3，也不需要自己维护播放器代际：
+
+```java
+ProbePlayer player = ProbePlayer.create(context, new ProbePlayerListener() {
+    @Override
+    public void onStatusChanged(ProbePlayerStatus status) {
+        // 更新进度、时长和播放状态。
+    }
+});
+
+player.attachSurface(surface);
+long sessionId = player.open(media, startPositionMs, true);
+```
+
+`ProbePlayer` 提供 `play()`、`pause()`、`seekTo(long)`、`stop()`、`getStatus()` 和幂等 `close()`。每次 `open` 返回新的 `sessionId`，所有回调都携带或包含该代际；旧媒体的迟到回调不会污染新媒体。`Surface` 仍归宿主所有，SDK 不会释放它。完整合同见 [可见播放器](docs/PLAYER.md)。
+
+## 指纹采集与候选扫描
+
+从已知广告区间生成一条经过 rules-v1 约束校验的规则草稿：
+
+```java
+AudioFingerprintCollector collector =
+        new AudioFingerprintCollector.Builder(context).build();
+FingerprintCaptureRequest request = FingerprintCaptureRequest
+        .builder(media, ruleId, adStartMs, adEndMs)
+        .setAnchor(anchorOffsetMs, anchorDurationMs)
+        .build();
+ProbeToolSession session = collector.capture(request, captureListener);
+```
+
+`FingerprintRuleDraft.toRuleJson()` 只输出一条可合并的规则对象；它不会直接覆盖规则文件。候选扫描只读取 HLS VOD 清单，不下载媒体分片：
+
+```java
+HlsCandidateScanner scanner = new HlsCandidateScanner.Builder().build();
+ProbeToolSession scan = scanner.scan(media, scanListener);
+```
+
+扫描结果是结构候选而不是已验证广告，仍需宿主选择区间并交给指纹采集。采集和扫描均为单活动会话、可取消、结构化终态；详细 DTO、限制和线程合同见 [采集与扫描工具](docs/COLLECTOR_TOOLS.md)。
 
 ## 带请求头的媒体
 
@@ -142,7 +212,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 
 ## 可替换适配器
 
-默认依赖会自动发现官方 Media3 1.9.2 实现。底层已经拆成稳定 PCM 解码 SPI，第三方也可以实现 VLC、FFmpeg、系统 MediaCodec 或其他播放器后端；适配器只提交 PCM16、真实 PTS、时间轴和结构化错误，不能接触规则、匹配结果或宿主 seek。
+默认依赖会自动发现官方 Media3 1.9.2 实现。底层已经拆成独立的音频探针 SPI 与可见播放 SPI，第三方可以实现 VLC、FFmpeg、系统 MediaCodec 或其他播放器后端；音频适配器只提交 PCM16、真实 PTS、时间轴和结构化错误，不能接触规则、匹配结果或宿主 seek。
 
 自定义实现只依赖 runtime，不会携带 Media3：
 
@@ -158,7 +228,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
         .build();
 ```
 
-SPI 版本、PCM 借用语义、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。未来的官方 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
+检测侧通过 `ProbeAdapterFactory` 注入，可见播放侧通过 `ProbePlaybackAdapterFactory` 注入。SPI 版本、PCM 借用语义、Surface 所有权、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。未来的官方 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
 
 所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证旧媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
 
@@ -175,7 +245,7 @@ SPI 版本、PCM 借用语义、线程和会话约束见 [适配器开发合同]
 
 宿主与探针必须使用能稳定返回同一内容、同一媒体时间轴和同一目标音轨的 URL 与请求头。每次请求动态个性化内容、带 `ENDLIST` 的 SSAI 伪点播或宿主主动切换到不同语言音轨，都超出首版自动跳转保证；这类来源应显式停用 Probe 或提供能复现宿主音轨的自定义适配器。
 
-Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前薄聚合 AAR 约 1.1 KiB，runtime 约 51 KiB，官方 Media3 适配器约 33 KiB，适配器 API 约 4.8 KiB。Release R8 烟测中，默认一行依赖 APK 约 125 KiB，只接 runtime 和自定义适配器的无 Media3 APK 约 24 KiB。这些只是当前最小测试宿主的数据，真实增量仍应以应用自己的 Release APK 差值为准。
+Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前 Release AAR 大小为：薄聚合 1.1 KiB、runtime 56.5 KiB、适配器 API 8.9 KiB、player 30.9 KiB、collector-tools 76.1 KiB、官方 Media3 适配器 45.4 KiB。Release R8 烟测同时引用检测、可见播放、采集和扫描 API：默认一行依赖 APK 为 128.5 KiB，只接 runtime/player/tools 与自定义空适配器的无 Media3 APK 为 25.9 KiB。这些是最小测试宿主的结果，真实增量仍应以应用自己的 Release APK 差值为准。
 
 当前 `0.1.x` 是预发布线。JVM 状态机、lint、AAR、Maven 传递依赖和 Release R8 已纳入 CI；正式宣称稳定前仍需完成 API 23/29/35 真机的 AAC-TS HLS、fMP4 HLS、普通 MP4、seek/回退与 ENDED 恢复测试。
 
@@ -185,7 +255,7 @@ Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主
 
 ```bash
 ./gradlew test lintRelease assembleRelease publishToMavenLocal
-./gradlew -p consumer-smoke verifyPublishedModuleGraph :consumer:assembleRelease :custom-consumer:assembleRelease
+./gradlew -p consumer-smoke verifyPublishedModuleGraph verifyMinifiedServiceProviders :custom-consumer:assembleRelease
 ```
 
 ## 发布

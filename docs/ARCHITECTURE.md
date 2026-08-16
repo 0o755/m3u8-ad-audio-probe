@@ -4,14 +4,16 @@
 
 ```text
 probe-api          宿主 DTO、状态、错误、时钟和监听器（纯 Java）
-probe-adapter-api  PCM 解码适配器 SPI，不包含具体播放器
+probe-adapter-api  音频解码与可见播放 SPI，不包含具体播放器
 probe-core         规则解析、指纹匹配、冲突协调、派发队列（纯 Java）
 probe-runtime      Android 门面、规则缓存、会话与跳转安全状态机
-probe-media3-1-9   官方 Media3 1.9.2 音频解码适配器
-probe              默认薄聚合，只组合 runtime 与一个官方适配器
+probe-player       可见点播播放器门面，不包含具体播放器
+probe-collector-tools 指纹采集与 HLS 结构候选扫描
+probe-media3-1-9   官方 Media3 1.9.2 音频与可见播放适配器
+probe              默认薄聚合，组合 runtime/player/tools 与一个官方适配器
 ```
 
-普通宿主只依赖 `ad-audio-probe`。自定义适配器宿主依赖 `ad-audio-probe-runtime` 并显式注入工厂，因此运行时依赖图可以完全没有 Media3。所有 Media3、PCM 和 matcher 内部类型都不会进入宿主播放 API。
+普通宿主只依赖 `ad-audio-probe`。自定义适配器宿主按需依赖 runtime、player 或 collector-tools 并显式注入工厂，因此运行时依赖图可以完全没有 Media3。所有 Media3、PCM 和 matcher 内部类型都不会进入宿主播放 API。
 
 ## 数据流
 
@@ -72,6 +74,7 @@ PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
 - 新规则先落临时文件并完整解析，成功后才通过私有 AtomicFile 发布。
 - 同一进程的多个 Probe 实例按规则 URL 共享缓存锁并在提交前重读 revision，避免并发写回退。
 - 只接受更高 revision；同 revision 不同内容会报告发布冲突，绝不静默替换。
+- 本地 `replaceRules*` 是有界异步操作；每次返回独立 requestId，并以 APPLIED、REJECTED 或 SUPERSEDED 恰好结束一次，因此同 revision 替换也能精确等待。
 - Probe v1 不读取旧 SDK 规则；规则存在即启用。每条规则可携带严格校验的 `test` 工具元数据，运行时匹配器会忽略它。
 
 首版缓存协调是进程内合同。应用应只在实际播放进程创建 Probe，不要从多个 Android 进程同时刷新同一规则 URL。

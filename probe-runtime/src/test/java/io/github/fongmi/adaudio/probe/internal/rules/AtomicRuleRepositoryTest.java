@@ -1,11 +1,22 @@
-/* 验证规则刷新在线程池关闭竞态下不会向宿主抛出拒绝异常。 */
+/* 验证本地规则替换与远程刷新辅助逻辑的边界行为。 */
 package io.github.fongmi.adaudio.probe.internal.rules;
+
+import android.content.Context;
+import android.content.ContextWrapper;
 
 import org.junit.Test;
 
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import io.github.fongmi.adaudio.probe.ProbeErrorCode;
+import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -59,6 +70,69 @@ public class AtomicRuleRepositoryTest {
                 AtomicRuleRepository.cacheLockFor("rules-a"));
         assertNotSame(AtomicRuleRepository.cacheLockFor("rules-a"),
                 AtomicRuleRepository.cacheLockFor("rules-b"));
+    }
+
+    @Test
+    public void localOnlyRepositoryReplacesAsynchronouslyAndKeepsLastValidRules()
+            throws Exception {
+        CountDownLatch rulesDelivered = new CountDownLatch(1);
+        CountDownLatch failureDelivered = new CountDownLatch(1);
+        AtomicReference<Long> appliedRequestId = new AtomicReference<>();
+        AtomicReference<ProbeErrorCode> failureCode = new AtomicReference<>();
+        AtomicReference<Long> failedRequestId = new AtomicReference<>();
+        AtomicBoolean failureHadRules = new AtomicBoolean();
+        Context context = new ContextWrapper(null) {
+            @Override
+            public Context getApplicationContext() {
+                return this;
+            }
+
+            @Override
+            public File getCacheDir() {
+                return new File(System.getProperty("java.io.tmpdir"));
+            }
+        };
+        AtomicRuleRepository repository = new AtomicRuleRepository(
+                context, null, new AtomicRuleRepository.Listener() {
+                    @Override
+                    public void onRules(AdRuleSet rules, boolean fromCache,
+                                        long replacementRequestId) {
+                        appliedRequestId.set(replacementRequestId);
+                        rulesDelivered.countDown();
+                    }
+
+                    @Override
+                    public void onFailure(ProbeErrorCode code, boolean cacheAvailable,
+                                          Exception error, long replacementRequestId) {
+                        failureCode.set(code);
+                        failedRequestId.set(replacementRequestId);
+                        failureHadRules.set(cacheAvailable);
+                        failureDelivered.countDown();
+                    }
+
+                    @Override
+                    public void onReplacementSuperseded(long replacementRequestId) {
+                    }
+                });
+        try {
+            String valid = "{\"format\":\"ad-audio-probe-rules\","
+                    + "\"schemaVersion\":1,\"revision\":3,"
+                    + "\"algorithm\":\"spectral-sequence-v1\",\"rules\":[]}";
+            long requestId = repository.replace(valid.getBytes(StandardCharsets.UTF_8));
+            assertTrue(rulesDelivered.await(5L, TimeUnit.SECONDS));
+            assertEquals(Long.valueOf(requestId), appliedRequestId.get());
+            assertEquals(3L, repository.getCurrentRules().getRevision());
+
+            long invalidRequestId = repository.replace("{".getBytes(StandardCharsets.UTF_8));
+            assertTrue(failureDelivered.await(5L, TimeUnit.SECONDS));
+            assertEquals(ProbeErrorCode.RULE_PARSE_FAILED, failureCode.get());
+            assertEquals(Long.valueOf(invalidRequestId), failedRequestId.get());
+            assertTrue(failureHadRules.get());
+            assertEquals(3L, repository.getCurrentRules().getRevision());
+            assertThrows(IllegalStateException.class, repository::refresh);
+        } finally {
+            repository.close();
+        }
     }
 
     private static String repeat(char value, int count) {

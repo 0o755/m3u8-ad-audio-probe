@@ -2,7 +2,9 @@
 
 ## 职责边界
 
-`ProbeAdapter` 是音频解码 SPI，不是广告过滤器。实现只负责：
+适配器 API 包含两套互相独立的 SPI：`ProbeAdapter` 负责无头音频解码，`ProbePlaybackAdapter` 负责可见点播。它们都不是广告过滤器。
+
+音频适配器只负责：
 
 - 打开普通 HLS/MP4 点播并选择音轨；
 - 输出交错 PCM16 和解码器真实 presentation timestamp；
@@ -37,6 +39,12 @@ META-INF/services/io.github.fongmi.adaudio.probe.adapter.ProbeAdapterFactory
 ```
 
 文件内容为工厂完整类名。未显式设置工厂时，runtime 要求 classpath 中恰好存在一个 provider；缺失或存在多个都会在初始化时明确失败，绝不按顺序随机选择。
+
+可见播放器使用独立服务入口：
+
+```text
+META-INF/services/io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackAdapterFactory
+```
 
 用于服务发现的工厂必须提供 `public` 无参构造器，并在自己的 consumer R8 规则中精确保留工厂和服务资源。显式 `setAdapterFactory(...)` 不依赖服务发现，也不需要这条保留规则。
 
@@ -102,3 +110,15 @@ io.github.0o755:ad-audio-probe-media3-1.9.2
 ```
 
 未来适配不同 Media3 ABI 时使用新的制品和版本化实现包；不会把多个 Media3 版本打进 fat AAR，也不会要求第三方复制 matcher。
+
+## 可见播放 SPI
+
+`ProbePlaybackAdapterFactory` 与音频工厂有独立的 `SPI_VERSION`，并通过 `getPlaybackSpiVersion()` 返回播放合同版本，避免同一工厂实现两套 SPI 时版本方法冲突。实现创建 `ProbePlaybackAdapter`，支持 `open`、Surface 附加、播放/暂停、seek、状态快照、精确 session 停止和幂等关闭。
+
+- 只借用宿主 `Surface`，不得调用 `release()`；
+- 控制方法和 `getSnapshot` 必须快速、非阻塞；
+- 直播或动态时间轴必须如实通过 `onTimeline` 报告，由门面统一拒绝；
+- 所有回调携带原始正数 `sessionId`，旧会话必须无操作；
+- 适配器只负责播放，不得解析规则、匹配广告或触发跳转。
+
+宿主通过 `ProbePlayer.Builder.setAdapterFactory(...)` 显式注入。第三方可以只实现音频、只实现播放，或由同一个工厂类同时实现两套 SPI；两套服务发现均要求 classpath 中恰好一个 provider。

@@ -1,4 +1,4 @@
-/* 规则仓库以私有 AtomicFile 缓存严格 JSON，网络失败时只回退到已验证版本。 */
+/* 规则仓库串行处理本地注入与 HTTPS 刷新，并只发布完整验证的 JSON。 */
 package io.github.fongmi.adaudio.probe.internal.rules;
 
 import android.content.Context;
@@ -32,16 +32,20 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.github.fongmi.adaudio.probe.ProbeErrorCode;
 
 public final class AtomicRuleRepository implements AutoCloseable {
     public interface Listener {
-        void onRules(AdRuleSet rules, boolean fromCache);
-        void onFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error);
+        void onRules(AdRuleSet rules, boolean fromCache, long replacementRequestId);
+        void onFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error,
+                       long replacementRequestId);
+        void onReplacementSuperseded(long replacementRequestId);
     }
 
-    private static final int MAX_RULE_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_RULE_BYTES = RuleSetJsonParser.MAX_DOCUMENT_BYTES;
     private static final int MAX_URL_LENGTH = 8192;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 20_000;
@@ -58,6 +62,10 @@ public final class AtomicRuleRepository implements AutoCloseable {
     private final AtomicBoolean loading = new AtomicBoolean();
     private final AtomicBoolean refreshAgain = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicReference<ReplacementRequest> pendingReplacement =
+            new AtomicReference<>();
+    private final AtomicBoolean replacementWorkerScheduled = new AtomicBoolean();
+    private final AtomicLong replacementSequence = new AtomicLong();
 
     private volatile HttpURLConnection activeConnection;
     private volatile AdRuleSet currentRules;
@@ -65,21 +73,27 @@ public final class AtomicRuleRepository implements AutoCloseable {
 
     public AtomicRuleRepository(Context context, String ruleUrl, Listener listener) {
         Context appContext = context.getApplicationContext();
-        this.ruleUrl = validateRuleUrl(ruleUrl);
+        this.ruleUrl = ruleUrl == null ? null : validateRuleUrl(ruleUrl);
         this.listener = listener;
-        File directory = new File(appContext.getNoBackupFilesDir(), "ad-audio-probe");
-        if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory()) {
-            throw new IllegalStateException("无法创建规则缓存目录");
+        if (this.ruleUrl == null) {
+            this.cache = null;
+            this.cacheLock = null;
+        } else {
+            File directory = new File(appContext.getNoBackupFilesDir(), "ad-audio-probe");
+            if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory()) {
+                throw new IllegalStateException("无法创建规则缓存目录");
+            }
+            File cacheFile = new File(directory, digest(this.ruleUrl) + ".json");
+            this.cache = new AtomicFile(cacheFile);
+            this.cacheLock = cacheLockFor(cacheFile.getAbsolutePath());
         }
-        File cacheFile = new File(directory, digest(this.ruleUrl) + ".json");
-        this.cache = new AtomicFile(cacheFile);
-        this.cacheLock = cacheLockFor(cacheFile.getAbsolutePath());
         this.tempDirectory = appContext.getCacheDir();
         this.executor = Executors.newSingleThreadExecutor(new DaemonThreadFactory());
     }
 
     /** 首次调用会先发布有效缓存，再尝试网络更新；重复刷新会合并。 */
     public void refresh() {
+        if (ruleUrl == null) throw new IllegalStateException("未配置远程规则地址");
         if (closed.get()) return;
         if (!loading.compareAndSet(false, true)) {
             refreshAgain.set(true);
@@ -90,7 +104,7 @@ public final class AtomicRuleRepository implements AutoCloseable {
             refreshAgain.set(false);
             if (!closed.get()) {
                 deliverFailure(ProbeErrorCode.RULE_FETCH_FAILED, currentRules != null,
-                        new IllegalStateException("规则加载线程不可用"));
+                        new IllegalStateException("规则加载线程不可用"), 0L);
             }
         }
     }
@@ -99,12 +113,78 @@ public final class AtomicRuleRepository implements AutoCloseable {
         return currentRules;
     }
 
+    public boolean hasRemoteSource() {
+        return ruleUrl != null;
+    }
+
+    /** 后台严格解析并无条件替换进程内规则；失败时保留最后一个有效版本。 */
+    public long replace(byte[] rulesJson) {
+        byte[] owned = RuleSetJsonParser.copyDocument(rulesJson);
+        if (closed.get()) throw new IllegalStateException("规则仓库已关闭");
+        long requestId = nextReplacementId();
+        ReplacementRequest request = new ReplacementRequest(requestId, owned);
+        ReplacementRequest superseded = pendingReplacement.getAndSet(request);
+        if (superseded != null) deliverReplacementSuperseded(superseded.requestId);
+        if (closed.get()) {
+            pendingReplacement.compareAndSet(request, null);
+            throw new IllegalStateException("规则仓库已关闭");
+        }
+        HttpURLConnection connection = activeConnection;
+        if (connection != null) connection.disconnect();
+        scheduleReplacementWorker();
+        return requestId;
+    }
+
+    /** 高频替换只保留最新待解析载荷，避免调用方在后台队列中堆积大数组。 */
+    private void scheduleReplacementWorker() {
+        if (!replacementWorkerScheduled.compareAndSet(false, true)) return;
+        if (!tryExecute(executor, this::drainReplacements)) {
+            ReplacementRequest dropped = pendingReplacement.getAndSet(null);
+            replacementWorkerScheduled.set(false);
+            if (!closed.get()) {
+                deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, currentRules != null,
+                        new IllegalStateException("规则替换线程不可用"),
+                        dropped == null ? 0L : dropped.requestId);
+                if (pendingReplacement.get() != null) scheduleReplacementWorker();
+            }
+        }
+    }
+
+    private void drainReplacements() {
+        try {
+            while (!closed.get()) {
+                ReplacementRequest request = pendingReplacement.getAndSet(null);
+                if (request == null) break;
+                replaceOnce(request);
+            }
+        } finally {
+            replacementWorkerScheduled.set(false);
+            if (!closed.get() && pendingReplacement.get() != null) {
+                scheduleReplacementWorker();
+            }
+        }
+    }
+
+    private void replaceOnce(ReplacementRequest request) {
+        try {
+            if (closed.get()) return;
+            AdRuleSet parsed = RuleSetJsonParser.parseUtf8(request.rulesJson);
+            currentRules = parsed;
+            currentDigest = toHex(sha256().digest(request.rulesJson));
+            deliverRules(parsed, false, request.requestId);
+        } catch (Exception error) {
+            deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, currentRules != null, error,
+                    request.requestId);
+        }
+    }
+
     private void loadLoop() {
         try {
             do {
                 refreshAgain.set(false);
                 loadOnce();
-            } while (!closed.get() && refreshAgain.getAndSet(false));
+            } while (!closed.get() && !hasPendingReplacement()
+                    && refreshAgain.getAndSet(false));
         } finally {
             loading.set(false);
             if (!closed.get() && refreshAgain.getAndSet(false)) refresh();
@@ -120,10 +200,12 @@ public final class AtomicRuleRepository implements AutoCloseable {
                     currentRules = cached.rules;
                     currentDigest = cached.digest;
                     cacheAvailable = true;
-                    deliverRules(cached.rules, true);
+                    deliverRules(cached.rules, true, 0L);
                 }
             } catch (Exception error) {
-                deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, false, error);
+                if (!hasPendingReplacement()) {
+                    deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, false, error, 0L);
+                }
             }
         }
         if (closed.get()) return;
@@ -143,27 +225,33 @@ public final class AtomicRuleRepository implements AutoCloseable {
             }
             RuleRevisionPolicy.Decision decision = outcome.decision;
             if (decision == RuleRevisionPolicy.Decision.REJECT_DOWNGRADE) {
-                if (currentRules != previous) deliverRules(currentRules, true);
+                if (currentRules != previous) deliverRules(currentRules, true, 0L);
                 throw new RevisionConflictException("远端规则修订号低于当前可信版本");
             } else if (decision == RuleRevisionPolicy.Decision.REVISION_CONFLICT) {
-                if (currentRules != previous) deliverRules(currentRules, true);
+                if (currentRules != previous) deliverRules(currentRules, true, 0L);
                 throw new RevisionConflictException("同 revision 的规则内容发生变化");
             } else if (decision == RuleRevisionPolicy.Decision.UNCHANGED) {
-                if (currentRules != previous) deliverRules(currentRules, true);
+                if (currentRules != previous) deliverRules(currentRules, true, 0L);
                 return;
             }
             if (closed.get()) return;
             currentRules = parsed;
             currentDigest = loaded.digest;
             if (previous == null || parsed.getRevision() > previous.getRevision()) {
-                deliverRules(parsed, false);
+                deliverRules(parsed, false, 0L);
             }
         } catch (RevisionConflictException error) {
-            deliverFailure(ProbeErrorCode.RULE_REVISION_CONFLICT, cacheAvailable, error);
+            if (!hasPendingReplacement()) {
+                deliverFailure(ProbeErrorCode.RULE_REVISION_CONFLICT, cacheAvailable, error, 0L);
+            }
         } catch (IllegalArgumentException error) {
-            deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, cacheAvailable, error);
+            if (!hasPendingReplacement()) {
+                deliverFailure(ProbeErrorCode.RULE_PARSE_FAILED, cacheAvailable, error, 0L);
+            }
         } catch (Exception error) {
-            deliverFailure(ProbeErrorCode.RULE_FETCH_FAILED, cacheAvailable, error);
+            if (!hasPendingReplacement()) {
+                deliverFailure(ProbeErrorCode.RULE_FETCH_FAILED, cacheAvailable, error, 0L);
+            }
         } finally {
             activeConnection = null;
             if (downloaded != null && downloaded.exists()) downloaded.delete();
@@ -171,6 +259,7 @@ public final class AtomicRuleRepository implements AutoCloseable {
     }
 
     private LoadedRules readCache() throws IOException {
+        if (cache == null) return null;
         synchronized (cacheLock) {
             return readCacheLocked();
         }
@@ -325,12 +414,34 @@ public final class AtomicRuleRepository implements AutoCloseable {
         output.flush();
     }
 
-    private void deliverRules(AdRuleSet rules, boolean fromCache) {
-        if (!closed.get() && listener != null) listener.onRules(rules, fromCache);
+    private void deliverRules(AdRuleSet rules, boolean fromCache, long replacementRequestId) {
+        if (!closed.get() && listener != null) {
+            listener.onRules(rules, fromCache, replacementRequestId);
+        }
     }
 
-    private void deliverFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error) {
-        if (!closed.get() && listener != null) listener.onFailure(code, cacheAvailable, error);
+    private void deliverFailure(ProbeErrorCode code, boolean cacheAvailable, Exception error,
+                                long replacementRequestId) {
+        if (!closed.get() && listener != null) {
+            listener.onFailure(code, cacheAvailable, error, replacementRequestId);
+        }
+    }
+
+    private void deliverReplacementSuperseded(long requestId) {
+        if (!closed.get() && listener != null) listener.onReplacementSuperseded(requestId);
+    }
+
+    private boolean hasPendingReplacement() {
+        return replacementWorkerScheduled.get() || pendingReplacement.get() != null;
+    }
+
+    private long nextReplacementId() {
+        long value = replacementSequence.incrementAndGet();
+        if (value > 0L) return value;
+        synchronized (replacementSequence) {
+            if (replacementSequence.get() <= 0L) replacementSequence.set(1L);
+            return replacementSequence.getAndIncrement();
+        }
     }
 
     @Override
@@ -338,6 +449,7 @@ public final class AtomicRuleRepository implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) return;
         HttpURLConnection connection = activeConnection;
         if (connection != null) connection.disconnect();
+        pendingReplacement.set(null);
         executor.shutdownNow();
     }
 
@@ -415,6 +527,16 @@ public final class AtomicRuleRepository implements AutoCloseable {
         LoadedRules(AdRuleSet rules, String digest) {
             this.rules = rules;
             this.digest = digest;
+        }
+    }
+
+    private static final class ReplacementRequest {
+        final long requestId;
+        final byte[] rulesJson;
+
+        ReplacementRequest(long requestId, byte[] rulesJson) {
+            this.requestId = requestId;
+            this.rulesJson = rulesJson;
         }
     }
 

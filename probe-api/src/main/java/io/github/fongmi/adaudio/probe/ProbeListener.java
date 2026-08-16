@@ -24,6 +24,14 @@ public interface ProbeListener {
     }
 
     /**
+     * 接收本地 rules-v1 替换请求的唯一终态。
+     *
+     * @param result 非空结果；可用 requestId 精确关联一次 replaceRules 调用
+     */
+    default void onRulesReplaced(RuleReplacementResult result) {
+    }
+
+    /**
      * 接收结构化错误。
      *
      * @param error 非空错误对象；是否影响当前会话由 {@link ProbeError#isFatal()} 表示

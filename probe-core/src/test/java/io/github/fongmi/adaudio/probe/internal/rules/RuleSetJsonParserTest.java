@@ -4,10 +4,13 @@ package io.github.fongmi.adaudio.probe.internal.rules;
 import org.junit.Test;
 
 import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 
 import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertThrows;
 
 public class RuleSetJsonParserTest {
     @Test
@@ -25,6 +28,44 @@ public class RuleSetJsonParserTest {
         String json = "{\"format\":\"ad-audio-probe-rules\",\"schemaVersion\":1,"
                 + "\"revision\":8,\"algorithm\":\"spectral-sequence-v1\",\"rules\":[]}";
         assertEquals(0, RuleSetJsonParser.parse(new StringReader(json)).getRules().size());
+    }
+
+    @Test
+    public void parsesStrictUtf8BytesAndOptionalBom() throws Exception {
+        byte[] json = validJson("7", variants()).getBytes(StandardCharsets.UTF_8);
+        byte[] withBom = new byte[json.length + 3];
+        withBom[0] = (byte) 0xef;
+        withBom[1] = (byte) 0xbb;
+        withBom[2] = (byte) 0xbf;
+        System.arraycopy(json, 0, withBom, 3, json.length);
+
+        assertEquals(7L, RuleSetJsonParser.parseUtf8(json).getRevision());
+        assertEquals(7L, RuleSetJsonParser.parseUtf8(withBom).getRevision());
+    }
+
+    @Test
+    public void rejectsMalformedUtf8AndOversizedPayloadBeforeParsing() {
+        assertThrows(IllegalArgumentException.class,
+                () -> RuleSetJsonParser.parseUtf8(new byte[] {(byte) 0xc3, 0x28}));
+        assertThrows(IllegalArgumentException.class,
+                () -> RuleSetJsonParser.copyDocument(
+                        new byte[RuleSetJsonParser.MAX_DOCUMENT_BYTES + 1]));
+    }
+
+    @Test
+    public void copiesBytesAndValidatesStringBeforeEncoding() {
+        byte[] input = validJson("7", variants()).getBytes(StandardCharsets.UTF_8);
+        byte[] owned = RuleSetJsonParser.copyDocument(input);
+
+        assertNotSame(input, owned);
+        byte first = owned[0];
+        input[0] ^= 1;
+        assertEquals(first, owned[0]);
+        assertThrows(IllegalArgumentException.class,
+                () -> RuleSetJsonParser.encodeDocument(String.valueOf((char) 0xd800)));
+        assertThrows(IllegalArgumentException.class,
+                () -> RuleSetJsonParser.encodeDocument(
+                        repeat('a', RuleSetJsonParser.MAX_DOCUMENT_BYTES + 1)));
     }
 
     @Test
@@ -112,6 +153,18 @@ public class RuleSetJsonParserTest {
     public void rejectsHttpTestUrlWithoutAuthority() throws Exception {
         RuleSetJsonParser.parse(new StringReader(validJson("7", variants(),
                 ",\"test\":{\"url\":\"https:video.mp4\",\"adStartMs\":0}")));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsHttpTestUrlWithoutHost() throws Exception {
+        RuleSetJsonParser.parse(new StringReader(validJson("7", variants(),
+                ",\"test\":{\"url\":\"https://@/video.mp4\",\"adStartMs\":0}")));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsRawBracketInTestUrlPath() throws Exception {
+        RuleSetJsonParser.parse(new StringReader(validJson("7", variants(),
+                ",\"test\":{\"url\":\"https://example.com/[x]\",\"adStartMs\":0}")));
     }
 
     @Test(expected = IllegalArgumentException.class)

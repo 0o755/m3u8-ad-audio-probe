@@ -1,0 +1,4 @@
+<!-- 候选扫描需要联网，但模块不声明组件、存储或录音权限。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

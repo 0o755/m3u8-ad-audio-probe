@@ -32,4 +32,6 @@ dependencies {
     val probeVersion = providers.gradleProperty("probeVersion")
         .orElse("0.1.0-SNAPSHOT")
     implementation("io.github.0o755:ad-audio-probe-runtime:${probeVersion.get()}")
+    implementation("io.github.0o755:ad-audio-probe-player:${probeVersion.get()}")
+    implementation("io.github.0o755:ad-audio-probe-collector-tools:${probeVersion.get()}")
 }

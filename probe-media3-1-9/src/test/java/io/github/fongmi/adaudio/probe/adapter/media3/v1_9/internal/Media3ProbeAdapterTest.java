@@ -4,6 +4,9 @@ package io.github.fongmi.adaudio.probe.adapter.media3.v1_9.internal;
 import androidx.media3.common.PlaybackException;
 
 import io.github.fongmi.adaudio.probe.ProbeErrorCode;
+import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterFactory;
+import io.github.fongmi.adaudio.probe.adapter.media3.v1_9.Media3ProbeAdapterFactory;
+import io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackAdapterFactory;
 
 import org.junit.Test;
 
@@ -23,6 +26,17 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class Media3ProbeAdapterTest {
+    @Test
+    public void officialFactoryPublishesBothVersionedSpis() {
+        Media3ProbeAdapterFactory factory = new Media3ProbeAdapterFactory();
+
+        assertTrue(factory instanceof ProbeAdapterFactory);
+        assertTrue(factory instanceof ProbePlaybackAdapterFactory);
+        assertEquals(ProbeAdapterFactory.SPI_VERSION, factory.getSpiVersion());
+        assertEquals(ProbePlaybackAdapterFactory.SPI_VERSION,
+                factory.getPlaybackSpiVersion());
+    }
+
     @Test
     public void firstPcmRecoveryOnlySeeksMeaningfullyBackward() {
         assertTrue(Media3ProbeAdapter.shouldRecoverBeforeFirstPcm(90_000L, 1_000L));

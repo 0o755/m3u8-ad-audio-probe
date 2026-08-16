@@ -21,6 +21,8 @@ include(
     ":probe-adapter-api",
     ":probe-core",
     ":probe-runtime",
+    ":probe-player",
+    ":probe-collector-tools",
     ":probe-media3-1-9",
     ":probe"
 )

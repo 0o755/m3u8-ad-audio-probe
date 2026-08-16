@@ -21,7 +21,7 @@ jobs:
       - name: Verify tests, lint, AAR and Maven metadata
         run: ./gradlew test lintRelease assembleRelease publishToMavenLocal --no-daemon
       - name: Verify published module graph and one-line external consumer
-        run: ./gradlew -p consumer-smoke verifyPublishedModuleGraph :consumer:assembleRelease :custom-consumer:assembleRelease --no-daemon
+        run: ./gradlew -p consumer-smoke verifyPublishedModuleGraph verifyMinifiedServiceProviders :custom-consumer:assembleRelease --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: ad-audio-probe-aars
@@ -29,4 +29,6 @@ jobs:
             probe/build/outputs/aar/probe-release.aar
             probe-adapter-api/build/outputs/aar/probe-adapter-api-release.aar
             probe-runtime/build/outputs/aar/probe-runtime-release.aar
+            probe-player/build/outputs/aar/probe-player-release.aar
+            probe-collector-tools/build/outputs/aar/probe-collector-tools-release.aar
             probe-media3-1-9/build/outputs/aar/probe-media3-1-9-release.aar

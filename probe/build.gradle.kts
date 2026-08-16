@@ -22,6 +22,8 @@ android {
 
 dependencies {
     api(project(":probe-runtime"))
+    api(project(":probe-player"))
+    api(project(":probe-collector-tools"))
     // 默认坐标在运行时带入一个官方实现，自定义适配器应直接依赖 probe-runtime。
     runtimeOnly(project(":probe-media3-1-9"))
 }
