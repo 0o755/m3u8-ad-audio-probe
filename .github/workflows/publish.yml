@@ -27,7 +27,8 @@ jobs:
           fi
           ./gradlew test lintRelease assembleRelease publishToMavenLocal \
             -PprobeVersion="$VERSION" --no-daemon
-          ./gradlew -p consumer-smoke :consumer:assembleRelease \
+          ./gradlew -p consumer-smoke verifyPublishedModuleGraph :consumer:assembleRelease \
+            :custom-consumer:assembleRelease \
             -PprobeVersion="$VERSION" --no-daemon
 
   publish-github-packages:

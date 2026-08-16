@@ -3,12 +3,15 @@
 ## 模块
 
 ```text
-probe-api   公开 DTO、状态、错误、宿主时钟和监听器
-probe-core  规则模型、严格流式解析、指纹匹配、冲突协调、派发队列
-probe       Android 门面、原子规则缓存、Media3 audio-only 解码器
+probe-api          宿主 DTO、状态、错误、时钟和监听器（纯 Java）
+probe-adapter-api  PCM 解码适配器 SPI，不包含具体播放器
+probe-core         规则解析、指纹匹配、冲突协调、派发队列（纯 Java）
+probe-runtime      Android 门面、规则缓存、会话与跳转安全状态机
+probe-media3-1-9   官方 Media3 1.9.2 音频解码适配器
+probe              默认薄聚合，只组合 runtime 与一个官方适配器
 ```
 
-宿主只依赖 `ad-audio-probe`。`probe-core` 和 `probe-api` 由 Maven POM 传递，但 Media3、PCM 和匹配器类型不会出现在公开方法签名中。
+普通宿主只依赖 `ad-audio-probe`。自定义适配器宿主依赖 `ad-audio-probe-runtime` 并显式注入工厂，因此运行时依赖图可以完全没有 Media3。所有 Media3、PCM 和 matcher 内部类型都不会进入宿主播放 API。
 
 ## 数据流
 
@@ -16,13 +19,10 @@ probe       Android 门面、原子规则缓存、Media3 audio-only 解码器
 媒体 URL + headers
         |
         v
-HLS / MP4 MediaSource
+ProbeAdapter（Media3 / 第三方实现）
         |
         v
-MediaCodecAudioRenderer
-        |
-        v
-ProbeAudioSink -- PCM16 + 真实 PTS --> AdAudioMatcher
+PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
                                              |
                                              v
                                   DetectionCoordinator
@@ -55,14 +55,14 @@ ProbeAudioSink -- PCM16 + 真实 PTS --> AdAudioMatcher
 
 ## 并发和生命周期
 
-- Media3 公共播放器操作只在私有 HandlerThread 执行；PCM 回调来自其 playback thread。
+- runtime 在私有 HandlerThread 串行调用适配器控制方法；PCM 可以来自适配器解码线程，但同一会话必须保持顺序。
 - 每个媒体代际独占匹配器、确认器和派发队列；旧 PCM 回调只能访问已作废的上下文。
 - 规则下载使用独立单线程 Executor，重复刷新合并。
 - 宿主时钟与监听器经 SerialExecutor 串行执行，默认落在主线程。
 - `open`、显式 discontinuity、停用和重新启用都会改变媒体代际。
 - 每个异步边界都重新检查 `closed/enabled/sessionId/ruleRevision`。
 - 回调不持匹配器或状态锁，只持生命周期门闩；监听器必须快速返回，异常不会终止规则、解码或轮询线程。
-- `close()` 穿过生命周期门闩后再取消网络并释放 Media3，已排队任务因代际检查失效。
+- `close()` 穿过生命周期门闩后再取消网络并释放适配器，已排队任务因代际检查失效。
 
 ## 规则更新
 
@@ -79,10 +79,10 @@ ProbeAudioSink -- PCM16 + 真实 PTS --> AdAudioMatcher
 ## 发布约束
 
 - `minSdk 23`、`compileSdk 35`、Java 8 ABI、构建 JDK 17。
-- Media3 1.9.2 是严格约束，因为自定义 AudioSink 使用其不稳定 API。
+- Media3 1.9.2 严格约束只属于对应官方适配器；runtime 和第三方适配器不继承该约束。
 - AAR 不预混淆、不打 fat AAR；宿主 Release R8 负责全局裁剪。
 - consumer rules 不保留整套 Media3，避免体积失控。
-- 独立 `consumer-smoke` 以开启 R8 的最小 Release APK 验证 Maven 传递依赖与混淆合同。
+- 独立 `consumer-smoke` 同时构建默认聚合消费者与零 Media3 的自定义适配器消费者，验证 Maven 传递依赖、ServiceLoader 和 R8 合同。
 - `0.1.x` 作为预发布线；升为稳定版前必须完成 API 23/29/35 真机的 AAC-TS HLS、fMP4 HLS、MP4、seek/回退与 ENDED 恢复矩阵。
 
 ## 资源边界

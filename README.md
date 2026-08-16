@@ -4,7 +4,7 @@
 
 ## 能力边界
 
-- 支持：有限时长的 HLS VOD、普通 MP4、HTTP(S) 请求头、宿主主动拖动/换源。
+- 支持：有限时长的 HLS VOD、普通 MP4、安全白名单 HTTP(S) 请求头、宿主主动拖动/换源。
 - 不支持：直播、DRM、DASH、RTSP、服务端动态插入且两次请求内容不一致的流。
 - 探针 fail-open：规则或媒体分析失败不会暂停、静音或操作宿主播放器。
 - SDK 不直接 seek。只有宿主进入已确认广告区间时，才回调一次 `SkipRequest`。
@@ -19,7 +19,7 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 
 当前预发布包先进入 GitHub Packages。GitHub Packages 仍要求宿主配置仓库地址和读取凭据，因此不把它宣传成“一行接入”；真正的一行依赖以 Maven Central 正式版本为准。源码调试可直接 `includeBuild` 或依赖 `project(":probe")`。
 
-首版锁定 Media3 `1.9.2`。公共 API 不含 Media3 类型，但宿主若强制使用其他 Media3 版本，Gradle 会明确报告版本冲突，避免运行期混版崩溃。
+默认聚合包使用官方 Media3 `1.9.2` 适配器，并只在该适配器内严格约束 Media3；公共 runtime 和 adapter SPI 完全不依赖 Media3。宿主已经使用其他 Media3 版本时，应选择对应版本的官方适配器，或实现自己的适配器，而不是让 Gradle 静默混用不稳定接口。当前首个官方实现坐标为 `ad-audio-probe-media3-1.9.2`。
 
 ## 规则格式
 
@@ -77,11 +77,13 @@ probe.open(ProbeMedia.builder(playUrl)
         .setId(episodeId)
         .setType(ProbeMedia.Type.HLS)
         .setHeader("User-Agent", userAgent)
-        .setHeader("Referer", referer)
+        .setHeader("Accept", "application/vnd.apple.mpegurl, video/mp4")
         .build());
 ```
 
-`ProbeMedia.Type.AUTO` 只根据 URL path 是否以 `.m3u8` 结尾选择 HLS，否则按 MP4 处理。无扩展名或通过查询参数区分的 HLS 必须显式设置 `Type.HLS`。HTTP 明文媒体是否可访问由宿主应用的 Network Security Config 决定，SDK 不放宽全局安全策略。
+`ProbeMedia.Type.AUTO` 不再把后缀当结论：`.m3u8`、`.mp4/.m4a/.m4v` 只决定首次尝试，无扩展名默认先按 MP4/Progressive 读取。适配器会旁路观察这次真实请求的 `Content-Type` 与最多 4096 字节响应前缀，并按合法顶层 box 扫描 MP4 `ftyp`；只有容器解析失败且证据明确为 `#EXTM3U`/HLS MIME 或 `ftyp`/MP4 MIME 时，才在同一会话内反向回退一次。它不会额外发送 HEAD/Range 预检，也不会因 401/403、HTML 或普通解码失败盲目重试。显式 `Type.HLS/MP4` 始终不回退。
+
+官方 Media3 适配器只接受 `User-Agent`、`Accept`、`Accept-Language`、`Cache-Control` 和 `Pragma`；其他头会在发起网络请求前以 fatal `UNSUPPORTED_SOURCE` 拒绝。这个限制确保底层同协议跨主机 30x 即使沿用请求头，也不会携带 Cookie、Authorization、Referer 或自定义令牌。确实需要鉴权头的宿主应使用能逐跳控制重定向的自定义适配器。SDK 默认禁止全部跨协议重定向；HTTP 明文媒体是否可访问仍由宿主应用的 Network Security Config 决定，SDK 不放宽全局安全策略。
 
 ## 跳转数据
 
@@ -138,11 +140,31 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 - `getStatus()`：随时读取不可变状态快照。
 - `close()`：永久释放，幂等；返回后不会再调用宿主监听器。
 
+## 可替换适配器
+
+默认依赖会自动发现官方 Media3 1.9.2 实现。底层已经拆成稳定 PCM 解码 SPI，第三方也可以实现 VLC、FFmpeg、系统 MediaCodec 或其他播放器后端；适配器只提交 PCM16、真实 PTS、时间轴和结构化错误，不能接触规则、匹配结果或宿主 seek。
+
+自定义实现只依赖 runtime，不会携带 Media3：
+
+```kotlin
+implementation("io.github.0o755:ad-audio-probe-runtime:0.1.0")
+```
+
+```java
+probe = AdAudioProbe.builder(context, rulesUrl)
+        .setPlaybackClock(player::getCurrentPosition)
+        .setListener(request -> player.seekTo(request.getSeekTargetPositionMs()))
+        .setAdapterFactory(new MyProbeAdapterFactory())
+        .build();
+```
+
+SPI 版本、PCM 借用语义、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。未来的官方 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
+
 所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证旧媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
 
 ## 实现与体积
 
-探针使用一个 `MediaCodecAudioRenderer` 和自定义无声 `AudioSink`：
+官方 Media3 1.9.2 适配器使用一个 `MediaCodecAudioRenderer` 和自定义无声 `AudioSink`：
 
 - 不创建 Surface、视频 Renderer、AudioTrack 或音频焦点。
 - 解码 PCM 带真实 presentation timestamp，直接在 SDK 内同步匹配。
@@ -151,7 +173,9 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 
 独立音频 rendition 的 HLS 通常只下载音频；如果 HLS 分片本身复用音视频，探针仍需读取完整分片，可能与宿主产生接近一次额外流量。片头广告也必须先完成最小帧数的网络获取和解码，不能在首个字节到达前凭空预知。
 
-Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前 Probe AAR 自身约 57 KiB；没有直接 Media3 依赖、开启 Release R8 且强制保留完整 Probe 调用链的独立烟测 APK 约 580 KiB。真实宿主的增量仍取决于已有依赖和 R8 结果，应以应用自己的 Release APK 差值为准。
+宿主与探针必须使用能稳定返回同一内容、同一媒体时间轴和同一目标音轨的 URL 与请求头。每次请求动态个性化内容、带 `ENDLIST` 的 SSAI 伪点播或宿主主动切换到不同语言音轨，都超出首版自动跳转保证；这类来源应显式停用 Probe 或提供能复现宿主音轨的自定义适配器。
+
+Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前薄聚合 AAR 约 1.1 KiB，runtime 约 51 KiB，官方 Media3 适配器约 33 KiB，适配器 API 约 4.8 KiB。Release R8 烟测中，默认一行依赖 APK 约 125 KiB，只接 runtime 和自定义适配器的无 Media3 APK 约 24 KiB。这些只是当前最小测试宿主的数据，真实增量仍应以应用自己的 Release APK 差值为准。
 
 当前 `0.1.x` 是预发布线。JVM 状态机、lint、AAR、Maven 传递依赖和 Release R8 已纳入 CI；正式宣称稳定前仍需完成 API 23/29/35 真机的 AAC-TS HLS、fMP4 HLS、普通 MP4、seek/回退与 ENDED 恢复测试。
 
@@ -161,7 +185,7 @@ Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主
 
 ```bash
 ./gradlew test lintRelease assembleRelease publishToMavenLocal
-./gradlew -p consumer-smoke :consumer:assembleRelease
+./gradlew -p consumer-smoke verifyPublishedModuleGraph :consumer:assembleRelease :custom-consumer:assembleRelease
 ```
 
 ## 发布

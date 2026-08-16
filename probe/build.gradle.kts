@@ -1,11 +1,11 @@
-// 对外 AAR 聚合规则加载、协调状态机与 Media3 音频探针。
+// 默认聚合 AAR 只组合运行时和官方 Media3 1.9 适配器，不承载业务实现。
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.maven.publish)
 }
 
 android {
-    namespace = "io.github.fongmi.adaudio.probe"
+    namespace = "io.github.fongmi.adaudio.probe.aggregate"
     compileSdk = 35
 
     defaultConfig {
@@ -18,23 +18,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
-    testOptions.unitTests.isIncludeAndroidResources = true
-
 }
 
 dependencies {
-    api(project(":probe-api"))
-    implementation(project(":probe-core"))
-    // AudioSink 属于 Media3 不稳定 API，首版必须整套锁定 1.9.2，拒绝静默混版。
-    implementation(libs.media3.exoplayer) {
-        version { strictly(libs.versions.media3.get()) }
-    }
-    implementation(libs.media3.hls) {
-        version { strictly(libs.versions.media3.get()) }
-    }
-    compileOnly(libs.annotation)
-
-    testImplementation(libs.junit)
+    api(project(":probe-runtime"))
+    // 默认坐标在运行时带入一个官方实现，自定义适配器应直接依赖 probe-runtime。
+    runtimeOnly(project(":probe-media3-1-9"))
 }
 
 mavenPublishing {

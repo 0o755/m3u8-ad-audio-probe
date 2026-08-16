@@ -1,4 +1,4 @@
-// 探针工程按公共合同、匹配核心和 Android 媒体实现拆分。
+// 探针工程按公共合同、匹配核心、运行时和可替换媒体适配器拆分。
 pluginManagement {
     repositories {
         google()
@@ -16,4 +16,11 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "m3u8-ad-audio-probe"
-include(":probe-api", ":probe-core", ":probe")
+include(
+    ":probe-api",
+    ":probe-adapter-api",
+    ":probe-core",
+    ":probe-runtime",
+    ":probe-media3-1-9",
+    ":probe"
+)

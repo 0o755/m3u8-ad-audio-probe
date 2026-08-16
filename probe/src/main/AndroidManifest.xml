@@ -1,4 +1,2 @@
-<!-- 探针仅访问宿主指定的媒体与规则地址，不申请存储、录音或前台服务权限。 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
-</manifest>
+<!-- 默认聚合模块不声明组件或权限，运行时模块提供实际网络权限。 -->
+<manifest />

@@ -17,4 +17,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "probe-consumer-smoke"
-include(":consumer")
+include(":consumer", ":custom-consumer")

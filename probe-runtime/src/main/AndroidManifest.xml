@@ -1,0 +1,4 @@
+<!-- 运行时只访问宿主指定的规则地址，不申请存储、录音或前台服务权限。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>
