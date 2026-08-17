@@ -1,9 +1,10 @@
-/* 实时匹配器以两帧产生候选、四至八帧确认跳过，并按相位偏移还原广告时间。 */
+/* 实时匹配器并行跟踪重叠相位候选，并在完整锚点验证后输出最终证据。 */
 package io.github.fongmi.adaudio.probe.internal.core;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -11,7 +12,7 @@ public final class AdAudioMatcher {
     private final AdRuleSet ruleSet;
     private final MatcherConfig config;
     private final List<CompiledRule> compiledRules;
-    private final Map<String, ActiveCandidate> activeCandidates = new HashMap<>();
+    private final Map<String, List<ActiveCandidate>> activeCandidates = new HashMap<>();
     private final Map<String, Long> nextAllowedTime = new HashMap<>();
     private final int windowSamples;
     private final int hopSamples;
@@ -96,8 +97,11 @@ public final class AdAudioMatcher {
         // 当前帧只有在完整窗口到齐后才会被计算，事件时间应表示已消费到的位置。
         long matchedAtTimeMs = safeAdd(currentTimeMs, ruleSet.getWindowMs());
         for (CompiledRule compiled : compiledRules) {
-            ActiveCandidate active = activeCandidates.get(compiled.rule.getId());
-            if (active != null) {
+            List<ActiveCandidate> candidates = activeCandidates.get(compiled.rule.getId());
+            if (candidates == null) candidates = new ArrayList<>();
+            Iterator<ActiveCandidate> iterator = candidates.iterator();
+            while (iterator.hasNext()) {
+                ActiveCandidate active = iterator.next();
                 if (!active.confirmed) {
                     if (currentTimeMs < active.confirmAtMs) continue;
                     int length = active.confirmationLength;
@@ -105,8 +109,6 @@ public final class AdAudioMatcher {
                     if (currentTimeMs == active.confirmAtMs
                             && quality.thresholdRatio >= config.getPrefixMatchRatio()) {
                         active.confirmed = true;
-                        nextAllowedTime.put(compiled.rule.getId(),
-                                active.endTimeMs + config.getCooldownMs());
                         events.add(new MatchEvent(MatchEvent.Type.START_MATCHED,
                                 compiled.rule.getId(), active.startTimeMs, active.endTimeMs,
                                 matchedAtTimeMs, quality.similarity, length));
@@ -116,73 +118,86 @@ public final class AdAudioMatcher {
                             events.add(new MatchEvent(MatchEvent.Type.FULL_MATCHED,
                                     compiled.rule.getId(), active.startTimeMs, active.endTimeMs,
                                     matchedAtTimeMs, quality.similarity, length));
-                            activeCandidates.remove(compiled.rule.getId());
+                            nextAllowedTime.put(compiled.rule.getId(),
+                                    active.endTimeMs + config.getCooldownMs());
+                            iterator.remove();
                         }
                     } else {
-                        activeCandidates.remove(compiled.rule.getId());
-                        // 当前帧也可能是真实广告的前缀，淘汰旧候选后继续尝试新候选。
+                        iterator.remove();
                     }
-                    if (active.confirmed
-                            || activeCandidates.containsKey(compiled.rule.getId())) continue;
-                }
-
-                if (active.confirmed) {
-                    long fullAtMs = active.firstFrameTimeMs
-                            + (long) (active.variant.hashes.length - 1) * ruleSet.getHopMs();
-                    if (currentTimeMs < fullAtMs) continue;
-                    MatchQuality quality = suffixMatchQuality(
-                            active.variant.hashes, active.variant.hashes.length);
-                    if (currentTimeMs == fullAtMs
-                            && quality.thresholdRatio >= config.getFullMatchRatio()) {
-                        events.add(new MatchEvent(MatchEvent.Type.FULL_MATCHED,
-                                compiled.rule.getId(), active.startTimeMs, active.endTimeMs,
-                                matchedAtTimeMs, quality.similarity,
-                                active.variant.hashes.length));
-                    }
-                    activeCandidates.remove(compiled.rule.getId());
                     continue;
                 }
+
+                long fullAtMs = active.firstFrameTimeMs
+                        + (long) (active.variant.hashes.length - 1) * ruleSet.getHopMs();
+                if (currentTimeMs < fullAtMs) continue;
+                MatchQuality quality = suffixMatchQuality(
+                        active.variant.hashes, active.variant.hashes.length);
+                if (currentTimeMs == fullAtMs
+                        && quality.thresholdRatio >= config.getFullMatchRatio()) {
+                    events.add(new MatchEvent(MatchEvent.Type.FULL_MATCHED,
+                            compiled.rule.getId(), active.startTimeMs, active.endTimeMs,
+                            matchedAtTimeMs, quality.similarity,
+                            active.variant.hashes.length));
+                    nextAllowedTime.put(compiled.rule.getId(),
+                            active.endTimeMs + config.getCooldownMs());
+                }
+                iterator.remove();
             }
 
             long allowed = nextAllowedTime.containsKey(compiled.rule.getId())
                     ? nextAllowedTime.get(compiled.rule.getId()) : Long.MIN_VALUE;
-            if (currentTimeMs < allowed) continue;
-            SequenceMatch candidate = bestPrefixMatch(compiled, config.getCandidateFrames());
-            if (candidate.variant == null || candidate.ratio < config.getPrefixMatchRatio()) continue;
-
-            long firstFrameTimeMs = currentTimeMs
-                    - (long) (candidate.length - 1) * ruleSet.getHopMs();
-            long anchorStartMs = firstFrameTimeMs - candidate.variant.offsetMs;
-            long rawStartTimeMs = anchorStartMs - compiled.rule.getAnchorOffsetMs();
-            long startTimeMs = Math.max(0L, rawStartTimeMs);
-            long endTimeMs = Math.max(0L, safeAdd(rawStartTimeMs, compiled.rule.getDurationMs()));
-            if (endTimeMs <= startTimeMs) continue;
-            int confirmationLength = Math.min(candidate.variant.hashes.length,
-                    Math.max(config.getConfirmationFrames(), candidate.variant.requiredConfirmationFrames));
-            long confirmAtMs = firstFrameTimeMs
-                    + (long) (confirmationLength - 1) * ruleSet.getHopMs();
-            activeCandidates.put(compiled.rule.getId(), new ActiveCandidate(
-                    candidate.variant, confirmationLength, firstFrameTimeMs,
-                    confirmAtMs, startTimeMs, endTimeMs));
-            events.add(new MatchEvent(MatchEvent.Type.CANDIDATE_MATCHED,
-                    compiled.rule.getId(), startTimeMs, endTimeMs,
-                    matchedAtTimeMs, candidate.similarity, candidate.length));
+            if (currentTimeMs >= allowed) {
+                for (SequenceMatch candidate : prefixMatches(
+                        compiled, config.getCandidateFrames())) {
+                    long firstFrameTimeMs = currentTimeMs
+                            - (long) (candidate.length - 1) * ruleSet.getHopMs();
+                    if (containsCandidate(candidates, candidate.variant, firstFrameTimeMs)) {
+                        continue;
+                    }
+                    long anchorStartMs = firstFrameTimeMs - candidate.variant.offsetMs;
+                    long rawStartTimeMs = anchorStartMs - compiled.rule.getAnchorOffsetMs();
+                    long startTimeMs = Math.max(0L, rawStartTimeMs);
+                    long endTimeMs = Math.max(0L,
+                            safeAdd(rawStartTimeMs, compiled.rule.getDurationMs()));
+                    if (endTimeMs <= startTimeMs) continue;
+                    int confirmationLength = Math.min(candidate.variant.hashes.length,
+                            Math.max(config.getConfirmationFrames(),
+                                    candidate.variant.requiredConfirmationFrames));
+                    long confirmAtMs = firstFrameTimeMs
+                            + (long) (confirmationLength - 1) * ruleSet.getHopMs();
+                    candidates.add(new ActiveCandidate(candidate.variant, confirmationLength,
+                            firstFrameTimeMs, confirmAtMs, startTimeMs, endTimeMs));
+                    events.add(new MatchEvent(MatchEvent.Type.CANDIDATE_MATCHED,
+                            compiled.rule.getId(), startTimeMs, endTimeMs,
+                            matchedAtTimeMs, candidate.similarity, candidate.length));
+                }
+            }
+            if (candidates.isEmpty()) activeCandidates.remove(compiled.rule.getId());
+            else activeCandidates.put(compiled.rule.getId(), candidates);
         }
     }
 
-    private SequenceMatch bestPrefixMatch(CompiledRule rule, int requestedLength) {
-        SequenceMatch best = SequenceMatch.NONE;
+    private List<SequenceMatch> prefixMatches(CompiledRule rule, int requestedLength) {
+        List<SequenceMatch> matches = new ArrayList<>();
         for (CompiledVariant variant : rule.variants) {
             int length = Math.min(requestedLength, variant.hashes.length);
             MatchQuality quality = suffixMatchQuality(variant.hashes, length);
-            if (quality.thresholdRatio > best.ratio
-                    || (quality.thresholdRatio == best.ratio
-                    && quality.similarity > best.similarity)) {
-                best = new SequenceMatch(variant, quality.thresholdRatio,
-                        quality.similarity, length);
-            }
+            if (quality.thresholdRatio < config.getPrefixMatchRatio()) continue;
+            matches.add(new SequenceMatch(variant, quality.thresholdRatio,
+                    quality.similarity, length));
         }
-        return best;
+        return matches;
+    }
+
+    private static boolean containsCandidate(List<ActiveCandidate> candidates,
+                                             CompiledVariant variant,
+                                             long firstFrameTimeMs) {
+        for (ActiveCandidate candidate : candidates) {
+            if (candidate.variant == variant
+                    && candidate.firstFrameTimeMs == firstFrameTimeMs) return true;
+        }
+        return false;
     }
 
     private MatchQuality suffixMatchQuality(int[] template, int length) {
@@ -255,15 +270,20 @@ public final class AdAudioMatcher {
     }
 
     private void expireCandidates(long timeMs) {
-        List<String> expired = new ArrayList<>();
-        for (Map.Entry<String, ActiveCandidate> entry : activeCandidates.entrySet()) {
-            ActiveCandidate candidate = entry.getValue();
-            long deadline = candidate.confirmed
-                    ? candidate.endTimeMs + config.getCooldownMs()
-                    : candidate.confirmAtMs;
-            if (timeMs > deadline) expired.add(entry.getKey());
+        Iterator<Map.Entry<String, List<ActiveCandidate>>> entries =
+                activeCandidates.entrySet().iterator();
+        while (entries.hasNext()) {
+            List<ActiveCandidate> candidates = entries.next().getValue();
+            Iterator<ActiveCandidate> iterator = candidates.iterator();
+            while (iterator.hasNext()) {
+                ActiveCandidate candidate = iterator.next();
+                long fullAtMs = candidate.firstFrameTimeMs
+                        + (long) (candidate.variant.hashes.length - 1) * ruleSet.getHopMs();
+                long deadline = candidate.confirmed ? fullAtMs : candidate.confirmAtMs;
+                if (timeMs > deadline) iterator.remove();
+            }
+            if (candidates.isEmpty()) entries.remove();
         }
-        for (String id : expired) activeCandidates.remove(id);
     }
 
     private void resetInternal() {

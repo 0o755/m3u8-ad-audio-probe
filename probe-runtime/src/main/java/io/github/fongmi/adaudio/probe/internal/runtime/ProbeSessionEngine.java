@@ -15,8 +15,10 @@ import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterState;
 import io.github.fongmi.adaudio.probe.adapter.ProbePcmFrame;
 import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
 import io.github.fongmi.adaudio.probe.internal.core.AdAudioMatcher;
+import io.github.fongmi.adaudio.probe.internal.core.AdRule;
 import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
 import io.github.fongmi.adaudio.probe.internal.core.FeedResult;
+import io.github.fongmi.adaudio.probe.internal.core.FingerprintVariant;
 import io.github.fongmi.adaudio.probe.internal.core.MatcherConfig;
 import io.github.fongmi.adaudio.probe.internal.core.PcmChunk;
 import io.github.fongmi.adaudio.probe.internal.runtime.AdDispatchQueue.Claim;
@@ -499,7 +501,7 @@ public final class ProbeSessionEngine implements AutoCloseable {
         final long sessionId;
         final long ruleRevision;
         final AdAudioMatcher matcher;
-        final DetectionCoordinator coordinator = new DetectionCoordinator();
+        final DetectionCoordinator coordinator;
         final AdDispatchQueue dispatchQueue = new AdDispatchQueue();
         final FiniteVodTimelineGate timelineGate = new FiniteVodTimelineGate();
         long analyzedThroughMs;
@@ -512,8 +514,20 @@ public final class ProbeSessionEngine implements AutoCloseable {
             this.sessionId = sessionId;
             this.ruleRevision = rules.getRevision();
             this.matcher = new AdAudioMatcher(rules, MatcherConfig.releaseSafe());
+            this.coordinator = DetectionCoordinator.fullMatchOnly(
+                    maxFingerprintFrames(rules), rules.getHopMs());
             this.analyzedThroughMs = startPositionMs;
             this.hostPositionMs = startPositionMs;
+        }
+
+        private static int maxFingerprintFrames(AdRuleSet rules) {
+            int max = AdRuleSet.MIN_CONFIRMATION_FRAMES;
+            for (AdRule rule : rules.getRules()) {
+                for (FingerprintVariant variant : rule.getFingerprints()) {
+                    max = Math.max(max, variant.getHashes().size());
+                }
+            }
+            return max;
         }
     }
 }

@@ -15,7 +15,6 @@ AudioFingerprintCollector collector =
 
 FingerprintCaptureRequest request = FingerprintCaptureRequest
         .builder(media, ruleId, adStartMs, adEndMs)
-        .setAnchor(anchorOffsetMs, anchorDurationMs)
         .build();
 
 ProbeToolSession session = collector.capture(request,
@@ -27,7 +26,7 @@ ProbeToolSession session = collector.capture(request,
         });
 ```
 
-采集范围必须是 2 秒到 10 分钟的已知广告区间；锚点为广告内连续 2 到 5 秒。输出固定包含 `0/64/128/192ms` 四相位指纹、测试 URL 和广告起点，并在返回前执行 rules-v1 长度、相位和区分度校验。调用 `session.cancel()` 只取消对应代际；同一 collector 开始新任务会取消旧任务。
+采集范围必须是 5 秒到 10 分钟的已知广告区间；锚点固定覆盖广告内连续 5000ms。无头播放器可以在不到 5 秒的现实时间内完成高速解码，但草稿必须包含完整 5 秒媒体 PCM。输出固定包含 `0/64/128/192ms` 四相位指纹、测试 URL 和广告起点，并在返回前执行 rules-v1 长度、相位和区分度校验。调用 `session.cancel()` 只取消对应代际；同一 collector 开始新任务会取消旧任务。
 
 ## HLS 候选扫描
 

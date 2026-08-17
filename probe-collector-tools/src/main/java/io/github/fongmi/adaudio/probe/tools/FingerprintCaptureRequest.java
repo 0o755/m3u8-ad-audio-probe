@@ -5,6 +5,8 @@ import io.github.fongmi.adaudio.probe.ProbeMedia;
 
 /** 一次广告音频指纹采集的不可变请求。 */
 public final class FingerprintCaptureRequest {
+    /** 自动跳转规则固定使用完整五秒媒体音频，避免短锚点误识别正片。 */
+    public static final long REQUIRED_ANCHOR_DURATION_MS = 5_000L;
     private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     private final ProbeMedia media;
     private final String ruleId;
@@ -23,7 +25,7 @@ public final class FingerprintCaptureRequest {
     }
 
     /**
-     * 创建请求构建器，默认锚点从广告开头起取最多 5 秒。
+     * 创建请求构建器，锚点固定采集 5 秒媒体音频。
      *
      * @param media 普通 HLS/MP4 点播媒体
      * @param ruleId rules-v1 规则 ID
@@ -72,22 +74,22 @@ public final class FingerprintCaptureRequest {
                 throw new IllegalArgumentException("广告时间范围无效");
             }
             long durationMs = adEndMs - adStartMs;
-            if (durationMs < 2000L || durationMs > 600_000L) {
-                throw new IllegalArgumentException("可采集广告时长必须为 2 秒到 10 分钟");
+            if (durationMs < REQUIRED_ANCHOR_DURATION_MS || durationMs > 600_000L) {
+                throw new IllegalArgumentException("可采集广告时长必须为 5 秒到 10 分钟");
             }
             this.media = media;
             this.ruleId = ruleId;
             this.adStartMs = adStartMs;
             this.adEndMs = adEndMs;
             this.anchorOffsetMs = 0L;
-            this.anchorDurationMs = Math.min(5000L, durationMs);
+            this.anchorDurationMs = REQUIRED_ANCHOR_DURATION_MS;
         }
 
         /**
          * 自定义广告内的锚点范围。
          *
          * @param offsetMs 相对广告起点的偏移
-         * @param durationMs 2 到 5 秒的锚点时长
+         * @param durationMs 固定为 5000 毫秒的锚点时长
          * @return 当前构建器
          */
         public Builder setAnchor(long offsetMs, long durationMs) {
@@ -99,9 +101,10 @@ public final class FingerprintCaptureRequest {
         /** @return 经过完整边界校验的不可变请求 */
         public FingerprintCaptureRequest build() {
             long adDurationMs = adEndMs - adStartMs;
-            if (anchorOffsetMs < 0L || anchorDurationMs < 2000L || anchorDurationMs > 5000L
+            if (anchorOffsetMs < 0L
+                    || anchorDurationMs != REQUIRED_ANCHOR_DURATION_MS
                     || anchorOffsetMs > adDurationMs - anchorDurationMs) {
-                throw new IllegalArgumentException("广告锚点范围无效");
+                throw new IllegalArgumentException("广告锚点必须完整覆盖 5 秒且位于广告区间内");
             }
             return new FingerprintCaptureRequest(this);
         }

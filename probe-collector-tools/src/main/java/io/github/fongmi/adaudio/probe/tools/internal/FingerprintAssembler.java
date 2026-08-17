@@ -57,7 +57,8 @@ public final class FingerprintAssembler {
         int sourceFrames = samples.length / channels;
         for (int index = first; index < lastExclusive; index++) {
             if (filled.get(index)) continue;
-            long sampleUs = anchorStartUs + index * 1_000_000L / TARGET_RATE;
+            // 16 kHz 的采样间隔为 62.5us，保留小数可避免整段锚点逐样本相位漂移。
+            double sampleUs = anchorStartUs + index * (1_000_000.0 / TARGET_RATE);
             double source = (sampleUs - frameStartUs)
                     * (frame.getSampleRateHz() / 1_000_000.0);
             if (source < 0.0 || source >= sourceFrames) continue;

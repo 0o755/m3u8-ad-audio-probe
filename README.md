@@ -126,12 +126,11 @@ AudioFingerprintCollector collector =
         new AudioFingerprintCollector.Builder(context).build();
 FingerprintCaptureRequest request = FingerprintCaptureRequest
         .builder(media, ruleId, adStartMs, adEndMs)
-        .setAnchor(anchorOffsetMs, anchorDurationMs)
         .build();
 ProbeToolSession session = collector.capture(request, captureListener);
 ```
 
-`FingerprintRuleDraft.toRuleJson()` 只输出一条可合并的规则对象；它不会直接覆盖规则文件。候选扫描只读取 HLS VOD 清单，不下载媒体分片：
+采集器固定提取广告内连续 5000ms 媒体音频；无头解码可以快于现实时间，但不会缩短媒体覆盖范围。`FingerprintRuleDraft.toRuleJson()` 只输出一条可合并的规则对象；它不会直接覆盖规则文件。候选扫描只读取 HLS VOD 清单，不下载媒体分片：
 
 ```java
 HlsCandidateScanner scanner = new HlsCandidateScanner.Builder().build();

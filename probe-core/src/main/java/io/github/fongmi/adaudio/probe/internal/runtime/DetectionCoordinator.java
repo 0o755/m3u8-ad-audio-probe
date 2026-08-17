@@ -14,13 +14,37 @@ import java.util.List;
 public final class DetectionCoordinator {
     static final long OCCURRENCE_START_TOLERANCE_MS = 250L;
 
+    private final MatchEvent.Type acceptedType;
+    private final int maxFingerprintFrames;
+    private final int hopMs;
     private final List<PendingOccurrence> pendingOccurrences = new ArrayList<>();
     private final List<ResolvedOccurrence> resolvedOccurrences = new ArrayList<>();
     private final List<MatchEvent> suppressedEvidence = new ArrayList<>();
     private final List<ConfirmedAd> immediateConflicts = new ArrayList<>();
     private long analyzedThroughMs = -1L;
 
-    /** 登记一条匹配证据；非 START 事件会被安全忽略。 */
+    /** 保留给核心冲突单测的 START 协调模式。生产跳转应使用 fullMatchOnly。 */
+    public DetectionCoordinator() {
+        this(MatchEvent.Type.START_MATCHED, 0, 0);
+    }
+
+    /** 创建完整锚点验证模式；START 仅作匹配器内部候选，不产生跳转区间。 */
+    public static DetectionCoordinator fullMatchOnly(int maxFingerprintFrames, int hopMs) {
+        if (maxFingerprintFrames < 4 || hopMs <= 0) {
+            throw new IllegalArgumentException("完整指纹窗口参数无效");
+        }
+        return new DetectionCoordinator(MatchEvent.Type.FULL_MATCHED,
+                maxFingerprintFrames, hopMs);
+    }
+
+    private DetectionCoordinator(MatchEvent.Type acceptedType,
+                                 int maxFingerprintFrames, int hopMs) {
+        this.acceptedType = acceptedType;
+        this.maxFingerprintFrames = maxFingerprintFrames;
+        this.hopMs = hopMs;
+    }
+
+    /** 登记一条匹配证据；不符合当前安全模式的事件会被忽略。 */
     public synchronized List<ConfirmedAd> onMatch(MatchEvent event) {
         addStartEvent(event);
         return resolveReadyOccurrences();
@@ -48,12 +72,12 @@ public final class DetectionCoordinator {
     }
 
     private void addStartEvent(MatchEvent event) {
-        if (!isValidStartEvent(event)) return;
+        if (!isValidEvidence(event)) return;
 
         PendingOccurrence occurrence = findPendingOccurrence(event.getStartTimeMs());
         if (occurrence == null) {
             if (isResolvedDuplicate(event)) return;
-            occurrence = new PendingOccurrence(event);
+            occurrence = new PendingOccurrence(event, confirmationDeadline(event));
             pendingOccurrences.add(occurrence);
         } else {
             occurrence.addEvidence(event);
@@ -203,13 +227,33 @@ public final class DetectionCoordinator {
         analyzedThroughMs = -1L;
     }
 
-    private static boolean isValidStartEvent(MatchEvent event) {
+    private boolean isValidEvidence(MatchEvent event) {
         return event != null
-                && event.getType() == MatchEvent.Type.START_MATCHED
+                && event.getType() == acceptedType
                 && event.getRuleId() != null
                 && !event.getRuleId().trim().isEmpty()
                 && event.getStartTimeMs() >= 0L
                 && event.getEndTimeMs() > event.getStartTimeMs();
+    }
+
+    private long confirmationDeadline(MatchEvent event) {
+        if (acceptedType != MatchEvent.Type.FULL_MATCHED) {
+            return AdConflictPolicy.normalizedDetectionTime(
+                    event.getMatchedAtTimeMs(), event.getMatchedFrames());
+        }
+        long remainingFrames = Math.max(0L,
+                (long) maxFingerprintFrames - event.getMatchedFrames());
+        long settleMs = saturatingMultiply(remainingFrames + 1L, hopMs);
+        return saturatingAdd(event.getMatchedAtTimeMs(), settleMs);
+    }
+
+    private static long saturatingMultiply(long left, long right) {
+        if (left <= 0L || right <= 0L) return 0L;
+        return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
+    }
+
+    private static long saturatingAdd(long left, long right) {
+        return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
     }
 
     private static boolean isNear(long first, long second, long toleranceMs) {
@@ -226,10 +270,9 @@ public final class DetectionCoordinator {
         long maxEndTimeMs;
         boolean globallyAmbiguous;
 
-        PendingOccurrence(MatchEvent first) {
+        PendingOccurrence(MatchEvent first, long confirmationDeadlineMs) {
             firstStartTimeMs = first.getStartTimeMs();
-            confirmationDeadlineMs = AdConflictPolicy.normalizedDetectionTime(
-                    first.getMatchedAtTimeMs(), first.getMatchedFrames());
+            this.confirmationDeadlineMs = confirmationDeadlineMs;
             minEndTimeMs = first.getEndTimeMs();
             maxEndTimeMs = first.getEndTimeMs();
             evidence.add(first);

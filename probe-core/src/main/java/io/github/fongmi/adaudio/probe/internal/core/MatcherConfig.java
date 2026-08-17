@@ -26,7 +26,7 @@ public final class MatcherConfig {
                 .setMaxHammingBits(5).build();
     }
 
-    /** 发布默认值：约 0.77 秒给出候选，约 1.28 秒确认后才允许跳转。 */
+    /** 发布默认值：约 0.77 秒给出候选，四帧 START 仅供内部跟踪重叠序列。 */
     public static MatcherConfig releaseSafe() {
         return new Builder().build();
     }

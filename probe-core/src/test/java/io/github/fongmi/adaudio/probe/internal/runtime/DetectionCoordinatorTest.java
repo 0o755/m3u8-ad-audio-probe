@@ -41,6 +41,33 @@ public class DetectionCoordinatorTest {
     }
 
     @Test
+    public void fullMatchModeIgnoresEarlyStartAndWaitsForWholeAnchor() {
+        DetectionCoordinator coordinator = DetectionCoordinator.fullMatchOnly(18, 256);
+        MatchEvent early = start("ad-a", 10_000L, 20_000L,
+                11_000L, 4, 0.99f);
+        MatchEvent full = new MatchEvent(MatchEvent.Type.FULL_MATCHED, "ad-a",
+                10_000L, 20_000L, 14_584L, 0.96f, 18);
+
+        assertTrue(coordinator.onMatch(early).isEmpty());
+        assertTrue(coordinator.onAnalyzedThrough(30_000L).isEmpty());
+        coordinator.reset();
+        assertTrue(coordinator.onMatch(full).isEmpty());
+        assertTrue(coordinator.onAnalyzedThrough(14_839L).isEmpty());
+        assertEquals(1, coordinator.onAnalyzedThrough(14_840L).size());
+    }
+
+    @Test
+    public void fullMatchModeWaitsForLongerRuleEvidence() {
+        DetectionCoordinator coordinator = DetectionCoordinator.fullMatchOnly(18, 256);
+        MatchEvent shortFull = new MatchEvent(MatchEvent.Type.FULL_MATCHED, "short-ad",
+                10_000L, 20_000L, 12_000L, 0.98f, 6);
+
+        assertTrue(coordinator.onMatch(shortFull).isEmpty());
+        assertTrue(coordinator.onAnalyzedThrough(15_327L).isEmpty());
+        assertEquals(1, coordinator.onAnalyzedThrough(15_328L).size());
+    }
+
+    @Test
     public void rejectsWholeOccurrenceWhenChainedEndsExceedTolerance() {
         DetectionCoordinator coordinator = new DetectionCoordinator();
         List<MatchEvent> evidence = Arrays.asList(

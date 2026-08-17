@@ -3,6 +3,8 @@ package io.github.fongmi.adaudio.probe.internal.core;
 
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -147,6 +149,32 @@ public class AdAudioMatcherTest {
         assertTrue(feed(matcher, audio, rate, 64).startMatched);
     }
 
+    @Test
+    public void overlappingFalseCandidateCannotHideNextValidPhase() {
+        int rate = AdRuleSet.SAMPLE_RATE;
+        short[] audio = buildDynamicAudio(rate, 3);
+        int[] streamHashes = firstHashes(audio, rate, 8);
+        List<FingerprintVariant> variants = new ArrayList<>();
+        variants.add(new FingerprintVariant(0, Arrays.asList(
+                hex(streamHashes[0]), hex(streamHashes[1]), hex(~streamHashes[2]),
+                hex(~streamHashes[3]), hex(~streamHashes[4]), hex(~streamHashes[5]))));
+        variants.add(decoyVariant(64, streamHashes[0]));
+        variants.add(new FingerprintVariant(128, Arrays.asList(
+                hex(streamHashes[1]), hex(streamHashes[2]), hex(streamHashes[3]),
+                hex(streamHashes[4]), hex(streamHashes[5]), hex(streamHashes[6]))));
+        variants.add(decoyVariant(192, streamHashes[0] ^ 0x55aa55aa));
+        AdRule rule = new AdRule("overlap-ad", 5000L, 0L, 2000L, variants);
+        AdRuleSet rules = new AdRuleSet(1L, rate, AdRuleSet.WINDOW_MS,
+                AdRuleSet.HOP_MS, AdRuleSet.BAND_COUNT, Collections.singletonList(rule));
+
+        MatchSummary result = feed(new AdAudioMatcher(rules, strictReleaseConfig()),
+                audio, rate, 64);
+
+        assertTrue(result.startMatched);
+        assertTrue(result.fullMatched);
+        assertTrue(Math.abs(result.startTimeMs - 128L) <= 1L);
+    }
+
     private MatcherConfig strictReleaseConfig() {
         return new MatcherConfig.Builder()
                 .setCandidateFrames(2)
@@ -255,6 +283,28 @@ public class AdAudioMatcherTest {
             output[i] = (short) Math.round(Math.sin(2.0 * Math.PI * frequency * second) * 10000.0);
         }
         return output;
+    }
+
+    private int[] firstHashes(short[] audio, int sampleRate, int count) {
+        int window = sampleRate * AdRuleSet.WINDOW_MS / 1000;
+        int hop = sampleRate * AdRuleSet.HOP_MS / 1000;
+        int[] output = new int[count];
+        for (int index = 0; index < count; index++) {
+            output[index] = SpectralFingerprint.hashWindowValue(
+                    audio, index * hop, window, sampleRate, AdRuleSet.BAND_COUNT);
+        }
+        return output;
+    }
+
+    private FingerprintVariant decoyVariant(int phaseMs, int seed) {
+        return new FingerprintVariant(phaseMs, Arrays.asList(
+                hex(~seed), hex(seed ^ 0x00ffffff), hex(~seed ^ 0x33003300),
+                hex(seed ^ 0x0f0ff0f0), hex(~seed ^ 0x55555555),
+                hex(seed ^ 0xaaaaaaaa)));
+    }
+
+    private String hex(int value) {
+        return String.format(java.util.Locale.US, "%08x", value);
     }
 
     private static final class MatchSummary {

@@ -4,12 +4,22 @@ package io.github.fongmi.adaudio.probe.tools.internal;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.List;
 
 import io.github.fongmi.adaudio.probe.ProbeMedia;
 import io.github.fongmi.adaudio.probe.adapter.ProbePcmFrame;
 import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
+import io.github.fongmi.adaudio.probe.internal.core.AdAudioMatcher;
+import io.github.fongmi.adaudio.probe.internal.core.AdRule;
+import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
+import io.github.fongmi.adaudio.probe.internal.core.FeedResult;
+import io.github.fongmi.adaudio.probe.internal.core.FingerprintVariant;
+import io.github.fongmi.adaudio.probe.internal.core.MatchEvent;
+import io.github.fongmi.adaudio.probe.internal.core.MatcherConfig;
+import io.github.fongmi.adaudio.probe.internal.core.PcmChunk;
 import io.github.fongmi.adaudio.probe.tools.FingerprintCaptureRequest;
 import io.github.fongmi.adaudio.probe.tools.FingerprintRuleDraft;
+import io.github.fongmi.adaudio.probe.tools.FingerprintSequence;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -20,11 +30,11 @@ public class FingerprintAssemblerTest {
     public void alignsStereoPcmAndBuildsDraft() {
         FingerprintCaptureRequest request = FingerprintCaptureRequest.builder(
                 ProbeMedia.from("https://example.com/video.m3u8"),
-                "sample-ad", 10_000L, 12_000L).build();
+                "sample-ad", 10_000L, 15_000L).build();
         FingerprintAssembler assembler = new FingerprintAssembler(request);
-        short[] stereo = variedStereo(48_000, 2);
+        short[] stereo = variedStereo(48_000, 5);
 
-        assembler.append(new ProbePcmFrame(stereo, 48_000, 2, 10_000_000L));
+        appendOneSecondChunks(assembler, stereo, 48_000, 2, 10_000_000L);
         FingerprintRuleDraft draft = assembler.finish();
 
         assertTrue(assembler.isComplete());
@@ -37,7 +47,7 @@ public class FingerprintAssemblerTest {
     public void rejectsLargeTimelineGap() {
         FingerprintCaptureRequest request = FingerprintCaptureRequest.builder(
                 ProbeMedia.from("https://example.com/video.m3u8"),
-                "sample-ad", 0L, 2000L).build();
+                "sample-ad", 0L, 5000L).build();
         FingerprintAssembler assembler = new FingerprintAssembler(request);
         assembler.append(new ProbePcmFrame(variedStereo(48_000, 1),
                 48_000, 2, 0L));
@@ -125,6 +135,45 @@ public class FingerprintAssemblerTest {
         assembler.append(new ProbePcmFrame(variedStereo(48_000, 1),
                 48_000, 2, 15_010_000L));
         assertTrue(assembler.isComplete());
+    }
+
+    @Test
+    public void capturedFiveSecondDraftProducesFullMatch() {
+        long adStartMs = 342_000L;
+        int sampleRate = AdRuleSet.SAMPLE_RATE;
+        short[] ad = variedStereo(sampleRate, 5);
+        FingerprintCaptureRequest request = FingerprintCaptureRequest.builder(
+                ProbeMedia.from("https://example.com/video/index.m3u8"),
+                "round-trip-ad", adStartMs, adStartMs + 15_132L).build();
+        FingerprintAssembler assembler = new FingerprintAssembler(request);
+        appendOneSecondChunks(assembler, ad, sampleRate, 2, adStartMs * 1000L);
+        FingerprintRuleDraft draft = assembler.finish();
+
+        List<FingerprintVariant> variants = new java.util.ArrayList<>();
+        for (FingerprintSequence sequence : draft.getFingerprints()) {
+            variants.add(new FingerprintVariant(sequence.getPhaseMs(), sequence.getHashes()));
+        }
+        AdRule rule = new AdRule(draft.getId(), draft.getDurationMs(),
+                draft.getAnchorOffsetMs(), draft.getAnchorDurationMs(), variants);
+        AdRuleSet rules = new AdRuleSet(1L, AdRuleSet.SAMPLE_RATE,
+                AdRuleSet.WINDOW_MS, AdRuleSet.HOP_MS, AdRuleSet.BAND_COUNT,
+                java.util.Collections.singletonList(rule));
+        AdAudioMatcher matcher = new AdAudioMatcher(rules, MatcherConfig.releaseSafe());
+
+        boolean fullyMatched = false;
+        int framesPerChunk = 1024;
+        for (int frameOffset = 0; frameOffset < ad.length / 2; frameOffset += framesPerChunk) {
+            int frameCount = Math.min(framesPerChunk, ad.length / 2 - frameOffset);
+            short[] chunk = Arrays.copyOfRange(ad, frameOffset * 2,
+                    (frameOffset + frameCount) * 2);
+            long startUs = adStartMs * 1000L + frameOffset * 1_000_000L / sampleRate;
+            FeedResult result = matcher.feed(new PcmChunk(chunk, sampleRate, 2,
+                    startUs / 1000L));
+            for (MatchEvent event : result.getEvents()) {
+                if (event.getType() == MatchEvent.Type.FULL_MATCHED) fullyMatched = true;
+            }
+        }
+        assertTrue("采集草稿必须完成五秒指纹验证", fullyMatched);
     }
 
     private void appendOneSecondChunks(FingerprintAssembler assembler, short[] pcm,
