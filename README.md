@@ -36,7 +36,7 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 
 ## 规则格式
 
-新 SDK 只接受独立的 Probe Rules v1，不兼容旧 SDK 的规则文件。根节点固定为：
+本项目使用独立定义的 Probe Rules v1，根节点固定为：
 
 ```json
 {
@@ -50,7 +50,7 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 
 规则存在于 JSON 中就表示启用，不再维护“待验证/已启用”状态。每条规则可以携带新的 `test` 元数据，供采集器保存测试链接和广告起点；Probe 会严格校验但不参与匹配。权威语义约束见 [规则合同](docs/RULES.md)，[JSON Schema](docs/rules-v1.schema.json) 负责通用结构校验，另有一份 [示例文件](docs/rules-v1.example.json)。文件最大 4 MiB、最多 1024 条规则；同一 URL 的 `revision` 必须单调递增。
 
-旧版 APK 和规则仓库生成的 schema v3 文件不能直接交给 Probe；采集器与公共规则仓库需要按 Probe Rules v1 重新生成。这里是有意断代，不保留旧启用状态或兼容转换层。
+规则生产端直接生成 Probe Rules v1；格式中不定义启用状态、待验证状态或隐式转换层。
 
 ### 本地规则与单规则复测
 
@@ -66,7 +66,7 @@ probe = AdAudioProbe.builder(context)
 probe.open(playUrl);
 ```
 
-运行中可调用 `replaceRules(byte[])` / `replaceRulesJson(String)` 原子替换规则，两者返回正数 `requestId`。解析在后台执行；应等待 `ProbeListener.onRulesReplaced` 收到同一 ID 的 `APPLIED`，再调用 `useRuleForTesting(ruleId)`。这在新旧文件 revision 相同时仍能精确判断提交完成；`REJECTED` 保留旧规则，`SUPERSEDED` 表示尚未解析就被更新请求覆盖。单规则测试只改变当前匹配视图并返回重建后的媒体 `sessionId`，不会修改 JSON、URL 或宿主播放器；`useAllRules()` 恢复全量规则。
+运行中可调用 `replaceRules(byte[])` / `replaceRulesJson(String)` 原子替换规则，两者返回正数 `requestId`。解析在后台执行；应等待 `ProbeListener.onRulesReplaced` 收到同一 ID 的 `APPLIED`，再调用 `useRuleForTesting(ruleId)`。这在替换前后文件 revision 相同时仍能精确判断提交完成；`REJECTED` 保留当前规则，`SUPERSEDED` 表示尚未解析就被更新请求覆盖。单规则测试只改变当前匹配视图并返回重建后的媒体 `sessionId`，不会修改 JSON、URL 或宿主播放器；`useAllRules()` 恢复全量规则。
 
 ## 最小接入
 
@@ -97,7 +97,7 @@ probe.close();
 probe.notifyHostDiscontinuity(player.getCurrentPosition());
 ```
 
-不调用也会由位置轮询发现明显跳变，但显式通知能更快取消旧会话结果。
+不调用也会由位置轮询发现明显跳变，但显式通知能更快取消过期会话结果。
 
 ## 可见播放器
 
@@ -115,7 +115,7 @@ player.attachSurface(surface);
 long sessionId = player.open(media, startPositionMs, true);
 ```
 
-`ProbePlayer` 提供 `play()`、`pause()`、`seekTo(long)`、`stop()`、`getStatus()` 和幂等 `close()`。每次 `open` 返回新的 `sessionId`，所有回调都携带或包含该代际；旧媒体的迟到回调不会污染新媒体。`Surface` 仍归宿主所有，SDK 不会释放它。完整合同见 [可见播放器](docs/PLAYER.md)。
+`ProbePlayer` 提供 `play()`、`pause()`、`seekTo(long)`、`stop()`、`getStatus()` 和幂等 `close()`。每次 `open` 返回新的 `sessionId`，所有回调都携带或包含该代际；前一媒体的迟到回调不会污染当前媒体。`Surface` 仍归宿主所有，SDK 不会释放它。完整合同见 [可见播放器](docs/PLAYER.md)。
 
 ## 指纹采集与候选扫描
 
@@ -152,7 +152,7 @@ probe.open(ProbeMedia.builder(playUrl)
 
 `ProbeMedia.Type.AUTO` 不再把后缀当结论：`.m3u8`、`.mp4/.m4a/.m4v` 只决定首次尝试，无扩展名默认先按 MP4/Progressive 读取。适配器会旁路观察这次真实请求的 `Content-Type` 与最多 4096 字节响应前缀，并按合法顶层 box 扫描 MP4 `ftyp`；只有容器解析失败且证据明确为 `#EXTM3U`/HLS MIME 或 `ftyp`/MP4 MIME 时，才在同一会话内反向回退一次。它不会额外发送 HEAD/Range 预检，也不会因 401/403、HTML 或普通解码失败盲目重试。显式 `Type.HLS/MP4` 始终不回退。
 
-官方 Media3 适配器只接受 `User-Agent`、`Accept`、`Accept-Language`、`Cache-Control` 和 `Pragma`；其他头会在发起网络请求前以 fatal `UNSUPPORTED_SOURCE` 拒绝。这个限制确保底层同协议跨主机 30x 即使沿用请求头，也不会携带 Cookie、Authorization、Referer 或自定义令牌。确实需要鉴权头的宿主应使用能逐跳控制重定向的自定义适配器。SDK 默认禁止全部跨协议重定向；HTTP 明文媒体是否可访问仍由宿主应用的 Network Security Config 决定，SDK 不放宽全局安全策略。
+官方 Media3 适配器只接受 `User-Agent`、`Accept`、`Accept-Language`、`Cache-Control` 和 `Pragma`；其他头会在发起网络请求前以 fatal `UNSUPPORTED_SOURCE` 拒绝。这个限制确保底层同协议跨主机 30x 即使继续携带请求头，也不会携带 Cookie、Authorization、Referer 或自定义令牌。确实需要鉴权头的宿主应使用能逐跳控制重定向的自定义适配器。SDK 默认禁止全部跨协议重定向；HTTP 明文媒体是否可访问仍由宿主应用的 Network Security Config 决定，SDK 不放宽全局安全策略。
 
 ## 跳转数据
 
@@ -170,7 +170,7 @@ probe.open(ProbeMedia.builder(playUrl)
 | `analyzedThroughPositionMs` | 探针已经连续分析到的位置 |
 | `matchSimilarity` | 0 到 1 的确认帧平均 Hamming 相似度，不是概率 |
 
-SDK 不会提前派发未来跳转。回调真正执行前会再次检查会话、规则版本、启用状态和宿主位置；旧链接排队中的请求会自动失效。
+SDK 不会提前派发未来跳转。回调真正执行前会再次检查会话、规则版本、启用状态和宿主位置；已替换媒体排队中的请求会自动失效。
 
 跳转请求采用一次性 fail-open：若宿主回调抛出异常，SDK 会报告结构化错误但不会循环重试和反复操作播放器。异步 seek 最终是否成功仍由宿主播放器负责。
 
@@ -202,7 +202,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 公开控制方法：
 
 - `open(String)` / `open(ProbeMedia)`：原子替换当前媒体，返回新 `sessionId`。
-- `notifyHostDiscontinuity(long)`：宿主时间轴跳变并废弃旧结果。
+- `notifyHostDiscontinuity(long)`：宿主时间轴跳变并废弃过期结果。
 - `setEnabled(boolean)`：关闭时释放当前分析，重新启用后按当前媒体新建会话。
 - `refreshRules()`：后台刷新规则；永不降级到更低 revision。
 - `stop()`：停止当前媒体，保留规则缓存和 SDK 实例。
@@ -229,7 +229,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 
 检测侧通过 `ProbeAdapterFactory` 注入，可见播放侧通过 `ProbePlaybackAdapterFactory` 注入。SPI 版本、PCM 借用语义、Surface 所有权、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。未来的官方 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
 
-所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证旧媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
+所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证过期媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
 
 ## 实现与体积
 

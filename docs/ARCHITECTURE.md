@@ -40,7 +40,7 @@ PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
 - 解码时间来自 MediaCodec 输出 PTS，不用 AudioTrack 消费量推算。
 - 宿主时间由配置的 Executor 每 100ms 读取一次，解码线程不跨线程调用宿主播放器。
 - 探针只分析 `[hostPosition, hostPosition + maxLookahead]`；超出后以不消费 ByteBuffer 的方式背压并暂停。
-- 明显前跳或回退会重建分析窗口，旧广告区间全部失效。
+- 明显前跳或回退会重建分析窗口，过期广告区间全部失效。
 
 ## 匹配安全
 
@@ -59,7 +59,7 @@ PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
 ## 并发和生命周期
 
 - runtime 在私有 HandlerThread 串行调用适配器控制方法；PCM 可以来自适配器解码线程，但同一会话必须保持顺序。
-- 每个媒体代际独占匹配器、确认器和派发队列；旧 PCM 回调只能访问已作废的上下文。
+- 每个媒体代际独占匹配器、确认器和派发队列；过期 PCM 回调只能访问已作废的上下文。
 - 规则下载使用独立单线程 Executor，重复刷新合并。
 - 宿主时钟与监听器经 SerialExecutor 串行执行，默认落在主线程。
 - `open`、显式 discontinuity、停用和重新启用都会改变媒体代际。
@@ -76,7 +76,7 @@ PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
 - 同一进程的多个 Probe 实例按规则 URL 共享缓存锁并在提交前重读 revision，避免并发写回退。
 - 只接受更高 revision；同 revision 不同内容会报告发布冲突，绝不静默替换。
 - 本地 `replaceRules*` 是有界异步操作；每次返回独立 requestId，并以 APPLIED、REJECTED 或 SUPERSEDED 恰好结束一次，因此同 revision 替换也能精确等待。
-- Probe v1 不读取旧 SDK 规则；规则存在即启用。每条规则可携带严格校验的 `test` 工具元数据，运行时匹配器会忽略它。
+- 运行时只读取 Probe Rules v1；规则存在即启用。每条规则可携带严格校验的 `test` 工具元数据，运行时匹配器会忽略它。
 
 首版缓存协调是进程内合同。应用应只在实际播放进程创建 Probe，不要从多个 Android 进程同时刷新同一规则 URL。
 

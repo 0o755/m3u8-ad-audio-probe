@@ -94,4 +94,4 @@ durationMs - anchorOffsetMs
 - 先由 SDK 解析器完成严格校验，再发布到规则 URL。
 - 内容、测试元数据或规则顺序有变化时都递增 revision。
 - 使用原子替换发布文件，避免客户端下载到截断 JSON。
-- 保留上一版可回滚文件，但回滚时必须发布更高 revision，不能复用旧 revision。
+- 保留上一版可回滚文件，但回滚时必须发布更高 revision，不能复用先前 revision。

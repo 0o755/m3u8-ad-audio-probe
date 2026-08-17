@@ -10,7 +10,7 @@
 - 输出交错 PCM16 和解码器真实 presentation timestamp；
 - 根据宿主位置维持有界前视，必要时暂停和恢复内部解码；
 - 报告时间轴重置、有限时长、解码状态和结构化错误；
-- 按精确 `sessionId` 停止和丢弃旧回调。
+- 按精确 `sessionId` 停止和丢弃过期回调。
 
 规则解析、指纹算法、冲突确认、Claim 撤销、宿主时钟二次校验和 `SkipRequest` 全部由 `probe-runtime` 独占。适配器不得自行判断广告、调用宿主播放器、缓存规则或产生跳转。
 
@@ -68,7 +68,7 @@ public final class MyAdapterFactory implements ProbeAdapterFactory {
 }
 ```
 
-`ProbeAdapterRequest` 提供正数 `sessionId`、不可变 `ProbeMedia`、宿主开始位置和最大前视长度。`open()` 必须先使上一媒体的网络、解码和回调失效，再启动新会话。`stop(id)` 只能停止完全相同的正数 ID；旧 ID 和 `0` 必须无操作。`close()` 必须幂等。所有控制方法必须快速返回，网络、解码和阻塞式释放必须异步完成；实现不得退出或长期占用 runtime 提供的 `controlLooper`。
+`ProbeAdapterRequest` 提供正数 `sessionId`、不可变 `ProbeMedia`、宿主开始位置和最大前视长度。`open()` 必须先使上一媒体的网络、解码和回调失效，再启动新会话。`stop(id)` 只能停止完全相同的正数 ID；非当前 ID 和 `0` 必须无操作。`close()` 必须幂等。所有控制方法必须快速返回，网络、解码和阻塞式释放必须异步完成；实现不得退出或长期占用 runtime 提供的 `controlLooper`。
 
 ## PCM 合同
 
@@ -85,7 +85,7 @@ listener.onPcm(sessionId, new ProbePcmFrame(
 - 单块 PCM 最长 2 秒；实现应优先提交解码器自然产生的短帧，不能用超大数组绕过前视背压。
 - 数组采用同步借用语义：runtime 只在 `onPcm` 调用内读取，不修改、不保留；回调返回后适配器可以复用。
 - 同一会话必须按媒体顺序提交。PTS 跳变、flush、内部 seek 或音轨格式切换前，先调用 `onTimelineReset(sessionId, newPositionMs)`。
-- 已停止/替换会话的 PCM 可以被 runtime 再次拦截，但实现仍有义务尽快停止旧生产者，避免浪费资源。
+- 已停止/替换会话的 PCM 可以被 runtime 再次拦截，但实现仍有义务尽快停止对应生产者，避免浪费资源。
 
 ## 线程与错误
 
@@ -101,7 +101,7 @@ Factory 在构建 Probe 时调用，不得启动网络或解码。所有 `open/u
 
 ## 版本策略
 
-`ProbeAdapterFactory.SPI_VERSION` 当前为 `1`。工厂必须返回相同版本，否则 runtime 在创建任何媒体资源前拒绝装配。SPI 的不兼容改动会提升该整数和 Maven 主版本。
+`ProbeAdapterFactory.SPI_VERSION` 当前为 `1`。工厂必须返回相同版本，否则 runtime 在创建任何媒体资源前拒绝装配。SPI 的破坏性改动会提升该整数和 Maven 主版本。
 
 官方 Media3 适配器按已验证的准确版本发布，例如：
 
@@ -118,7 +118,7 @@ io.github.0o755:ad-audio-probe-media3-1.9.2
 - 只借用宿主 `Surface`，不得调用 `release()`；
 - 控制方法和 `getSnapshot` 必须快速、非阻塞；
 - 直播或动态时间轴必须如实通过 `onTimeline` 报告，由门面统一拒绝；
-- 所有回调携带原始正数 `sessionId`，旧会话必须无操作；
+- 所有回调携带原始正数 `sessionId`，过期会话必须无操作；
 - 适配器只负责播放，不得解析规则、匹配广告或触发跳转。
 
 宿主通过 `ProbePlayer.Builder.setAdapterFactory(...)` 显式注入。第三方可以只实现音频、只实现播放，或由同一个工厂类同时实现两套 SPI；两套服务发现均要求 classpath 中恰好一个 provider。

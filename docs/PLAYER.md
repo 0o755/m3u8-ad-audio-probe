@@ -16,11 +16,11 @@ long sessionId = player.open(media, startPositionMs, true);
 
 - `open(String)` 和 `open(ProbeMedia)` 从 0 开始并立即播放。
 - `open(ProbeMedia, long, boolean)` 固定初始位置和播放意图。
-- 每次打开都会使旧会话失效并返回新的正数 `sessionId`。
+- 每次打开都会使前一会话失效并返回新的正数 `sessionId`。
 - `attachSurface` 不转移所有权；宿主负责创建和释放 Surface。
 - 需要释放 Surface 时，调用 `clearSurface(surface, onCleared)`，只在 `onCleared` 到达后释放该对象。完成回调与播放器事件一样由宿主 callback Executor 串行派发。
 - `clearSurface()` 和 `clearSurface(surface)` 保留为无需释放确认的 fire-and-forget 重载；它们只表示提交清除请求，不表示适配器已经同步完成。
-- 同一 Surface 在清除完成前被重新附加时，旧清除请求的完成回调会被抑制，避免宿主释放仍在使用的输出。应在 `close()` 之前提交需要确认的清除请求。
+- 同一 Surface 在清除完成前被重新附加时，过期清除请求的完成回调会被抑制，避免宿主释放仍在使用的输出。应在 `close()` 之前提交需要确认的清除请求。
 
 ## 控制与状态
 
@@ -35,7 +35,7 @@ long sessionId = player.open(media, startPositionMs, true);
 - `onFirstFrame`：当前会话首帧已提交给 Surface；
 - `onError`：结构化错误，fatal 表示当前会话不能继续。
 
-宿主必须按 `sessionId` 忽略自己的旧 UI 任务。`close()` 幂等，会使尚未开始的排队回调失效；已经进入宿主监听器的回调允许自然返回，因此宿主不能在监听器内部等待同一个 `close()`。
+宿主必须按 `sessionId` 忽略自己的过期 UI 任务。`close()` 幂等，会使尚未开始的排队回调失效；已经进入宿主监听器的回调允许自然返回，因此宿主不能在监听器内部等待同一个 `close()`。
 
 ## 自定义后端
 
