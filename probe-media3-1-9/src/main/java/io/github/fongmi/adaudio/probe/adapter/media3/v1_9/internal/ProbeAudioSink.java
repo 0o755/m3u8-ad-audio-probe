@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicLong;
 final class ProbeAudioSink implements AudioSink {
     // 与 Media3 默认 AudioSink 一致，超过 200ms 才视为真实时间轴跳变。
     static final long MAX_PRESENTATION_TIME_DRIFT_US = 200_000L;
+    // AAC 解码在 HLS 分片边界可能少交付一帧；仅桥接一个常见 AAC 帧量级的空洞。
+    static final long MAX_PCM_BRIDGE_US = 60_000L;
 
     interface AheadListener {
         void onAheadLimitReached();
@@ -47,6 +49,7 @@ final class ProbeAudioSink implements AudioSink {
     private long outputStreamOffsetUs;
     private long currentPositionUs = CURRENT_POSITION_NOT_SET;
     private long expectedPresentationTimeUs = CURRENT_POSITION_NOT_SET;
+    private short[] lastOutputSamples;
     private boolean ended;
 
     ProbeAudioSink(ProbePcmConsumer consumer, AheadListener aheadListener,
@@ -98,6 +101,7 @@ final class ProbeAudioSink implements AudioSink {
         pcmEncoding = inputFormat.pcmEncoding;
         currentPositionUs = CURRENT_POSITION_NOT_SET;
         expectedPresentationTimeUs = CURRENT_POSITION_NOT_SET;
+        lastOutputSamples = null;
         aheadNotified.set(false);
         synchronized (deliveryLock) {
             timelineEpoch.incrementAndGet();
@@ -152,17 +156,31 @@ final class ProbeAudioSink implements AudioSink {
             if (epoch < 0L) return false;
             if (listener != null) listener.onPositionDiscontinuity();
         }
+        long publishedPresentationTimeUs = presentationTimeUs;
+        if (canBridgePcmGap(expectedPresentationTimeUs, presentationTimeUs,
+                lastOutputSamples, channelCount)) {
+            long gapUs = presentationTimeUs - expectedPresentationTimeUs;
+            int missingFrames = gapFrames(gapUs, sampleRate);
+            if (missingFrames > 0) {
+                samples = prependInterpolatedFrames(lastOutputSamples, samples,
+                        channelCount, missingFrames);
+                publishedPresentationTimeUs = expectedPresentationTimeUs;
+            }
+        }
+        long publishedMediaTimeUs = toMediaTimeUs(
+                publishedPresentationTimeUs, outputStreamOffsetUs);
         synchronized (deliveryLock) {
             if (!acceptingData.get() || epoch != timelineEpoch.get()) return false;
             try {
                 consumer.onPcm(new ProbePcmFrame(samples, sampleRate, channelCount,
-                        mediaPresentationTimeUs));
+                        publishedMediaTimeUs));
             } catch (RuntimeException error) {
                 consumer.onFailure(error);
             }
+            lastOutputSamples = lastFrameSamples(samples, channelCount);
+            currentPositionUs = endUs;
+            expectedPresentationTimeUs = endUs;
         }
-        currentPositionUs = endUs;
-        expectedPresentationTimeUs = endUs;
         buffer.position(buffer.limit());
         return true;
     }
@@ -264,6 +282,7 @@ final class ProbeAudioSink implements AudioSink {
         synchronized (deliveryLock) {
             currentPositionUs = CURRENT_POSITION_NOT_SET;
             expectedPresentationTimeUs = CURRENT_POSITION_NOT_SET;
+            lastOutputSamples = null;
             aheadNotified.set(false);
             timelineEpoch.incrementAndGet();
             acceptingData.set(true);
@@ -276,6 +295,7 @@ final class ProbeAudioSink implements AudioSink {
             if (!acceptingData.get() || timelineEpoch.get() != expectedEpoch) return -1L;
             currentPositionUs = CURRENT_POSITION_NOT_SET;
             expectedPresentationTimeUs = CURRENT_POSITION_NOT_SET;
+            lastOutputSamples = null;
             aheadNotified.set(false);
             long nextEpoch = timelineEpoch.incrementAndGet();
             consumer.onTimelineReset();
@@ -307,6 +327,50 @@ final class ProbeAudioSink implements AudioSink {
                 }
             }
         }
+        return output;
+    }
+
+    static boolean canBridgePcmGap(long expectedUs, long actualUs,
+                                   short[] previousSamples, int channels) {
+        if (expectedUs == CURRENT_POSITION_NOT_SET || previousSamples == null
+                || channels <= 0 || previousSamples.length != channels
+                || actualUs <= expectedUs) return false;
+        long gapUs = actualUs - expectedUs;
+        return gapUs > 0L && gapUs <= MAX_PCM_BRIDGE_US;
+    }
+
+    static int gapFrames(long gapUs, int sampleRate) {
+        if (gapUs <= 0L || sampleRate <= 0) return 0;
+        long rounded = (gapUs * sampleRate + 500_000L) / 1_000_000L;
+        return (int) Math.min(Integer.MAX_VALUE, rounded);
+    }
+
+    static short[] prependInterpolatedFrames(short[] previousSamples, short[] currentSamples,
+                                             int channels, int missingFrames) {
+        if (missingFrames <= 0) return currentSamples;
+        if (previousSamples == null || currentSamples == null || channels <= 0
+                || previousSamples.length != channels || currentSamples.length < channels
+                || currentSamples.length % channels != 0) {
+            throw new IllegalArgumentException("PCM 缺口桥接参数无效");
+        }
+        int bridgeSamples = Math.multiplyExact(missingFrames, channels);
+        short[] output = new short[Math.addExact(bridgeSamples, currentSamples.length)];
+        for (int frame = 0; frame < missingFrames; frame++) {
+            double fraction = (frame + 1.0) / (missingFrames + 1.0);
+            for (int channel = 0; channel < channels; channel++) {
+                long value = Math.round(previousSamples[channel] * (1.0 - fraction)
+                        + currentSamples[channel] * fraction);
+                output[frame * channels + channel] = (short) Math.max(Short.MIN_VALUE,
+                        Math.min(Short.MAX_VALUE, value));
+            }
+        }
+        System.arraycopy(currentSamples, 0, output, bridgeSamples, currentSamples.length);
+        return output;
+    }
+
+    private static short[] lastFrameSamples(short[] samples, int channels) {
+        short[] output = new short[channels];
+        System.arraycopy(samples, samples.length - channels, output, 0, channels);
         return output;
     }
 

@@ -275,7 +275,13 @@ public final class AudioFingerprintCollector implements AutoCloseable {
     }
 
     private void timeout(long sessionId) {
-        fail(sessionId, ProbeToolErrorCode.TIMEOUT, true, "指纹采集超时", null);
+        ActiveCapture capture;
+        synchronized (monitor) {
+            capture = active;
+            if (!isActive(capture, sessionId)) return;
+        }
+        fail(sessionId, ProbeToolErrorCode.TIMEOUT, true,
+                "指纹采集超时：" + capture.assembler.coverageDiagnostics(), null);
     }
 
     private void fail(long sessionId, ProbeToolErrorCode code, boolean retryable,

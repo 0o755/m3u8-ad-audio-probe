@@ -12,6 +12,8 @@ import org.junit.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -144,10 +146,60 @@ public class ProbeAudioSinkTest {
         assertNotNull(consumer.frame);
     }
 
+    @Test
+    public void bridgesOneMissingAacFrameAtHlsSegmentBoundary() throws Exception {
+        RecordingConsumer consumer = new RecordingConsumer();
+        ProbeAudioSink sink = new ProbeAudioSink(consumer, () -> { },
+                new AtomicLong(), 15_000L);
+        Format format = new Format.Builder()
+                .setSampleMimeType(MimeTypes.AUDIO_RAW)
+                .setSampleRate(22_050)
+                .setChannelCount(2)
+                .setPcmEncoding(C.ENCODING_PCM_16BIT)
+                .build();
+        sink.configure(format, 0, null);
+        sink.confirmVodTimeline();
+        ByteBuffer first = stereoPcm(1_024, (short) 1_000, (short) -1_000);
+        ByteBuffer second = stereoPcm(1_024, (short) 3_000, (short) -3_000);
+
+        assertTrue(sink.handleBuffer(first, 0L, 1));
+        assertTrue(sink.handleBuffer(second, 92_888L, 1));
+
+        assertEquals(2, consumer.frames.size());
+        ProbePcmFrame bridged = consumer.frames.get(1);
+        assertEquals(46_439L, bridged.getPresentationTimeUs());
+        assertEquals((1_024 + 1_024) * 2, bridged.getSamples().length);
+        assertEquals(1_002, bridged.getSamples()[0]);
+        assertEquals(-1_002, bridged.getSamples()[1]);
+        assertEquals(3_000, bridged.getSamples()[2_048]);
+        assertEquals(-3_000, bridged.getSamples()[2_049]);
+    }
+
+    @Test
+    public void doesNotBridgeGapLargerThanOneDecoderFrame() {
+        assertFalse(ProbeAudioSink.canBridgePcmGap(1_000_000L, 1_060_001L,
+                new short[]{1, 2}, 2));
+        assertTrue(ProbeAudioSink.canBridgePcmGap(1_000_000L, 1_060_000L,
+                new short[]{1, 2}, 2));
+    }
+
+    private static ByteBuffer stereoPcm(int frames, short left, short right) {
+        ByteBuffer pcm = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN);
+        for (int frame = 0; frame < frames; frame++) {
+            pcm.putShort(left).putShort(right);
+        }
+        pcm.flip();
+        return pcm;
+    }
+
     private static final class RecordingConsumer implements ProbePcmConsumer {
         ProbePcmFrame frame;
+        final List<ProbePcmFrame> frames = new ArrayList<>();
 
-        @Override public void onPcm(ProbePcmFrame frame) { this.frame = frame; }
+        @Override public void onPcm(ProbePcmFrame frame) {
+            this.frame = frame;
+            frames.add(frame);
+        }
         @Override public void onTimelineReset() { }
         @Override public void onFailure(RuntimeException error) { throw error; }
     }

@@ -87,6 +87,22 @@ public final class FingerprintAssembler {
         return hasSafeCoverage();
     }
 
+    /** 仅供结构化超时诊断，避免把缺口误报成普通网络超时。 */
+    public synchronized String coverageDiagnostics() {
+        int firstFilled = filled.nextSetBit(0);
+        if (firstFilled < 0) return "没有覆盖锚点 PCM";
+        int lastFilledExclusive = filled.length();
+        int leadingMissing = firstFilled;
+        int trailingMissing = mono.length - lastFilledExclusive;
+        int internalMissing = mono.length - filledCount - leadingMissing - trailingMissing;
+        return "前缘缺失=" + samplesToMillis(leadingMissing)
+                + "ms,内部缺失=" + samplesToMillis(internalMissing)
+                + "ms,最长内部缺口=" + samplesToMillis(
+                longestInternalMissingRun(firstFilled, lastFilledExclusive))
+                + "ms,后缘缺失=" + samplesToMillis(trailingMissing)
+                + "ms,解码水位=" + observedThroughUs + "us";
+    }
+
     /** 丢弃断点前的全部采样，禁止跨时间线拼接指纹。 */
     public synchronized void reset() {
         java.util.Arrays.fill(mono, (short) 0);
@@ -190,5 +206,9 @@ public final class FingerprintAssembler {
     private static long multiplyExact(long value, long factor) {
         if (value > Long.MAX_VALUE / factor) throw new IllegalArgumentException("采集时间超出范围");
         return value * factor;
+    }
+
+    private static long samplesToMillis(int samples) {
+        return Math.round(samples * 1000.0 / TARGET_RATE);
     }
 }
