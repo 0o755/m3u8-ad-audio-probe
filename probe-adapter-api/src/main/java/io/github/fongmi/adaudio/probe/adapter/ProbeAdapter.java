@@ -38,7 +38,10 @@ public interface ProbeAdapter extends AutoCloseable {
         /** 报告解码时间轴不连续；runtime 会立即丢弃跨断点候选。 */
         void onTimelineReset(long sessionId, long positionMs);
 
-        /** 报告有限点播时间轴；直播或动态源由 runtime 统一拒绝。 */
+        /**
+         * 报告最新时间线快照。准备期快照允许被后续快照替换；适配器必须在
+         * {@link ProbeAdapterState#DECODING} 前报告权威快照。
+         */
         void onTimeline(long sessionId, long durationMs, boolean live, boolean dynamic);
 
         /** 报告播放器侧的低频生命周期状态。 */

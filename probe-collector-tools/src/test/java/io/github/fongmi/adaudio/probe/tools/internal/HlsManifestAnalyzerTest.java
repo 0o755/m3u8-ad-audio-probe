@@ -50,6 +50,28 @@ public class HlsManifestAnalyzerTest {
     }
 
     @Test
+    public void masterVodWithManyDiscontinuitiesKeepsKnownCandidate() throws Exception {
+        String master = "https://example.com/video/index.m3u8";
+        String media = "https://example.com/video/2000k_1080/hls/index.m3u8";
+        Map<String, String> manifests = new HashMap<>();
+        manifests.put(master, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n"
+                + "2000k_1080/hls/index.m3u8\n");
+        manifests.put(media, largeDiscontinuousVod());
+
+        HlsScanResult result = new HlsManifestAnalyzer().scan(
+                11L, master, loader(manifests), ACTIVE);
+
+        assertEquals(media, result.getMediaPlaylistUrl());
+        assertEquals(1_385_172L, result.getTotalDurationMs());
+        assertEquals(90, result.getDiscontinuityCount());
+        assertEquals(1, result.getCandidates().size());
+        assertEquals(342_000L, result.getCandidates().get(0)
+                .getOccurrences().get(0).getStartMs());
+        assertEquals(15_132L, result.getCandidates().get(0).getDurationMs());
+        assertEquals(80, result.getCandidates().get(0).getConfidence());
+    }
+
+    @Test
     public void rejectsLivePlaylist() throws Exception {
         String url = "https://example.com/live.m3u8";
         Map<String, String> manifests = new HashMap<>();
@@ -100,5 +122,29 @@ public class HlsManifestAnalyzerTest {
 
     private String simpleVod() {
         return "#EXTM3U\n#EXTINF:5,\na.ts\n#EXT-X-ENDLIST\n";
+    }
+
+    private String largeDiscontinuousVod() {
+        StringBuilder playlist = new StringBuilder("#EXTM3U\n"
+                + "#EXT-X-PLAYLIST-TYPE:VOD\n");
+        appendSegments(playlist, "main/pre-", 171, 2.0);
+        playlist.append("#EXT-X-DISCONTINUITY\n");
+        appendSegments(playlist, "ad/spot-", 6, 2.522);
+        playlist.append("#EXT-X-DISCONTINUITY\n");
+        appendSegments(playlist, "main/post-", 428, 2.196);
+        appendSegments(playlist, "main/post-tail-", 1, 0.152);
+        for (int index = 0; index < 88; index++) {
+            playlist.append("#EXT-X-DISCONTINUITY\n")
+                    .append("#EXTINF:1.0,\nmarker/").append(index).append(".ts\n");
+        }
+        return playlist.append("#EXT-X-ENDLIST\n").toString();
+    }
+
+    private void appendSegments(StringBuilder output, String prefix,
+                                int count, double durationSeconds) {
+        for (int index = 0; index < count; index++) {
+            output.append("#EXTINF:").append(durationSeconds).append(",\n")
+                    .append(prefix).append(index).append(".ts\n");
+        }
     }
 }

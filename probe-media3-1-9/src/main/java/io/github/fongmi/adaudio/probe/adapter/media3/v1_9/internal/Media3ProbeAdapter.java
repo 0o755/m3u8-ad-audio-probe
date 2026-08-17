@@ -47,6 +47,7 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
     private final Handler handler;
     private final Listener listener;
     private final Timeline.Window timelineWindow = new Timeline.Window();
+    private final Media3VodTimelineGate timelineGate = new Media3VodTimelineGate();
     private final AtomicLong hostPositionMs = new AtomicLong();
 
     private ExoPlayer player;
@@ -63,6 +64,7 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
     private volatile boolean receivedPcm;
     private volatile boolean aheadPaused;
     private volatile boolean awaitingSinkReset;
+    private volatile boolean vodTimelineConfirmed;
     private boolean autoFallbackAttempted;
     private volatile boolean closed;
 
@@ -104,10 +106,12 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
                               long startPositionMs) {
         long currentAttemptId = ++attemptId;
         releasePlayer();
+        timelineGate.reset();
         decodedThroughMs = Math.max(0L, startPositionMs);
         receivedPcm = false;
         aheadPaused = false;
         awaitingSinkReset = false;
+        vodTimelineConfirmed = false;
 
         ProbePcmConsumer pcmConsumer = new SessionPcmConsumer(expectedSessionId, currentAttemptId);
         audioSink = new ProbeAudioSink(pcmConsumer,
@@ -418,6 +422,38 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
                 ? null : ProbeErrorCode.UNSUPPORTED_SOURCE;
     }
 
+    private boolean publishAuthoritativeTimeline(long expectedSessionId,
+                                                 long expectedAttemptId) {
+        if (!isAttemptCurrent(expectedSessionId, expectedAttemptId) || player == null) {
+            return false;
+        }
+        Timeline timeline = player.getCurrentTimeline();
+        if (timeline.isEmpty()) return false;
+        int windowIndex = player.getCurrentMediaItemIndex();
+        if (windowIndex < 0 || windowIndex >= timeline.getWindowCount()) return false;
+        Timeline.Window window = timeline.getWindow(windowIndex, timelineWindow);
+        Media3VodTimelineGate.Decision decision = timelineGate.update(
+                window.isPlaceholder, window.isLive(), window.isDynamic);
+        if (decision == Media3VodTimelineGate.Decision.PENDING
+                && player.getPlaybackState() == Player.STATE_READY) {
+            decision = timelineGate.markReady();
+        }
+        if (decision == Media3VodTimelineGate.Decision.PENDING
+                || decision == Media3VodTimelineGate.Decision.IGNORED) return false;
+        if (decision == Media3VodTimelineGate.Decision.REJECT_LIVE
+                || decision == Media3VodTimelineGate.Decision.REJECT_DYNAMIC) {
+            fail(expectedSessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED,
+                    true, false, "首版仅支持有限时长的普通点播", null);
+            return false;
+        }
+        durationMs = window.getDurationMs();
+        listener.onTimeline(expectedSessionId, durationMs, false, false);
+        if (!isAttemptCurrent(expectedSessionId, expectedAttemptId)) return false;
+        vodTimelineConfirmed = true;
+        if (audioSink != null) audioSink.confirmVodTimeline();
+        return true;
+    }
+
     private final class SessionPcmConsumer implements ProbePcmConsumer {
         private final long expectedSessionId;
         private final long expectedAttemptId;
@@ -430,7 +466,7 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
         @Override
         public void onPcm(ProbePcmFrame frame) {
             if (!isAttemptCurrent(expectedSessionId, expectedAttemptId)
-                    || awaitingSinkReset) return;
+                    || awaitingSinkReset || !vodTimelineConfirmed) return;
             listener.onPcm(expectedSessionId, frame);
             if (!isAttemptCurrent(expectedSessionId, expectedAttemptId)
                     || awaitingSinkReset) return;
@@ -469,10 +505,10 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
         public void onPlaybackStateChanged(int playbackState) {
             if (!isAttemptCurrent(expectedSessionId, expectedAttemptId) || player == null) return;
             if (playbackState == Player.STATE_READY) {
-                if (player.isCurrentMediaItemLive()) {
-                    fail(expectedSessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED,
-                            true, false, "首版仅支持普通点播，不支持直播", null);
-                } else if (!player.getCurrentTracks().containsType(C.TRACK_TYPE_AUDIO)) {
+                if (!publishAuthoritativeTimeline(expectedSessionId, expectedAttemptId)) {
+                    return;
+                }
+                if (!player.getCurrentTracks().containsType(C.TRACK_TYPE_AUDIO)) {
                     fail(expectedSessionId, ProbeErrorCode.NO_AUDIO_TRACK,
                             true, false, "媒体中没有可解码音轨", null);
                 } else if (!player.getCurrentTracks().isTypeSupported(C.TRACK_TYPE_AUDIO)
@@ -490,10 +526,10 @@ public final class Media3ProbeAdapter implements ProbeAdapter {
         @Override
         public void onTimelineChanged(Timeline timeline, int reason) {
             if (!isAttemptCurrent(expectedSessionId, expectedAttemptId) || timeline.isEmpty()) return;
-            Timeline.Window window = timeline.getWindow(0, timelineWindow);
-            durationMs = window.getDurationMs();
-            listener.onTimeline(expectedSessionId, durationMs,
-                    window.isLive(), window.isDynamic);
+            if (publishAuthoritativeTimeline(expectedSessionId, expectedAttemptId)
+                    && player != null && player.getPlaybackState() == Player.STATE_READY) {
+                onPlaybackStateChanged(Player.STATE_READY);
+            }
         }
 
         @Override

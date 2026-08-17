@@ -3,8 +3,11 @@ package io.github.fongmi.adaudio.probe.tools.internal;
 
 import org.junit.Test;
 
+import java.util.Arrays;
+
 import io.github.fongmi.adaudio.probe.ProbeMedia;
 import io.github.fongmi.adaudio.probe.adapter.ProbePcmFrame;
+import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
 import io.github.fongmi.adaudio.probe.tools.FingerprintCaptureRequest;
 import io.github.fongmi.adaudio.probe.tools.FingerprintRuleDraft;
 
@@ -38,6 +41,37 @@ public class FingerprintAssemblerTest {
         assembler.append(new ProbePcmFrame(variedStereo(48_000, 1),
                 48_000, 2, 0L));
         assembler.finish();
+    }
+
+    @Test
+    public void transientDynamicMasterStillProducesKnownCandidateDraft() {
+        FiniteVodTimelineGate timeline = new FiniteVodTimelineGate();
+        assertEquals(FiniteVodTimelineGate.Decision.PENDING,
+                timeline.update(-1L, false, true));
+        assertEquals(FiniteVodTimelineGate.Decision.PENDING,
+                timeline.update(1_385_172L, false, false));
+        assertEquals(FiniteVodTimelineGate.Decision.VOD_CONFIRMED, timeline.markReady());
+
+        FingerprintCaptureRequest request = FingerprintCaptureRequest.builder(
+                ProbeMedia.from("https://example.com/video/index.m3u8"),
+                "auto-ad-b5eebc0445f595f6", 342_000L, 357_132L).build();
+        FingerprintAssembler assembler = new FingerprintAssembler(request);
+        short[] pcm = variedStereo(48_000, 5);
+        int samplesPerSecond = 48_000 * 2;
+        for (int second = 0; second < 5; second++) {
+            short[] chunk = Arrays.copyOfRange(pcm, second * samplesPerSecond,
+                    (second + 1) * samplesPerSecond);
+            assembler.append(new ProbePcmFrame(chunk, 48_000, 2,
+                    (342_000L + second * 1000L) * 1000L));
+        }
+
+        FingerprintRuleDraft draft = assembler.finish();
+        assertTrue(assembler.isComplete());
+        assertEquals("auto-ad-b5eebc0445f595f6", draft.getId());
+        assertEquals(15_132L, draft.getDurationMs());
+        assertEquals(5_000L, draft.getAnchorDurationMs());
+        assertEquals(342_000L, draft.getTestAdStartMs());
+        assertEquals(4, draft.getFingerprints().size());
     }
 
     private short[] variedStereo(int sampleRate, int seconds) {

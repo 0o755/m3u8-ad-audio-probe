@@ -32,6 +32,7 @@ final class ProbeAudioSink implements AudioSink {
     private final long maxLookaheadMs;
     private final AtomicBoolean aheadNotified = new AtomicBoolean();
     private final AtomicBoolean acceptingData = new AtomicBoolean(true);
+    private final AtomicBoolean vodTimelineConfirmed = new AtomicBoolean();
     private final AtomicLong timelineEpoch = new AtomicLong();
     private final Object deliveryLock = new Object();
 
@@ -118,7 +119,8 @@ final class ProbeAudioSink implements AudioSink {
     @Override
     public boolean handleBuffer(ByteBuffer buffer, long presentationTimeUs,
                                 int encodedAccessUnitCount) {
-        if (sampleRate <= 0 || inputChannelCount <= 0 || !acceptingData.get()) return false;
+        if (sampleRate <= 0 || inputChannelCount <= 0 || !acceptingData.get()
+                || !vodTimelineConfirmed.get()) return false;
         long epoch = timelineEpoch.get();
         // Media3 为 renderer 使用大偏移时钟；匹配器只接收宿主可见的媒体时间。
         long mediaPresentationTimeUs = toMediaTimeUs(presentationTimeUs, outputStreamOffsetUs);
@@ -243,6 +245,11 @@ final class ProbeAudioSink implements AudioSink {
 
     void allowMoreData() {
         aheadNotified.set(false);
+    }
+
+    /** 权威 VOD 时间线先到达，PCM 才允许离开解码器。 */
+    void confirmVodTimeline() {
+        vodTimelineConfirmed.set(true);
     }
 
     /** 主动 seek 前关闭 PCM 交付；真正 flush 到达后才重新开放。 */

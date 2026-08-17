@@ -18,6 +18,7 @@ import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterFactory;
 import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterRequest;
 import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterState;
 import io.github.fongmi.adaudio.probe.adapter.ProbePcmFrame;
+import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
 import io.github.fongmi.adaudio.probe.tools.internal.FingerprintAssembler;
 import io.github.fongmi.adaudio.probe.tools.internal.SerialCallbackExecutor;
 
@@ -134,7 +135,8 @@ public final class AudioFingerprintCollector implements AutoCloseable {
         ProbeToolError failure = null;
         synchronized (monitor) {
             capture = active;
-            if (!isActive(capture, sessionId) || frame == null) return;
+            if (!isActive(capture, sessionId) || frame == null
+                    || !capture.timelineGate.isVodConfirmed()) return;
             try {
                 capture.assembler.append(frame);
                 int percent = (int) Math.min(100L,
@@ -184,11 +186,14 @@ public final class AudioFingerprintCollector implements AutoCloseable {
         synchronized (monitor) {
             capture = active;
             if (!isActive(capture, sessionId)) return;
-            if (live || dynamic) {
+            FiniteVodTimelineGate.Decision decision = capture.timelineGate.update(
+                    durationMs, live, dynamic);
+            if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
                 error = finishWithErrorLocked(capture,
                         ProbeToolErrorCode.LIVE_STREAM_NOT_SUPPORTED, false,
                         "指纹采集仅支持有限时长点播", null);
-            } else if (durationMs > 0L && capture.request.getAdEndMs() > durationMs) {
+            } else if (decision == FiniteVodTimelineGate.Decision.VOD_CONFIRMED
+                    && durationMs > 0L && capture.request.getAdEndMs() > durationMs) {
                 error = finishWithErrorLocked(capture, ProbeToolErrorCode.INVALID_REQUEST,
                         false, "广告结束位置超过媒体时长", null);
             }
@@ -200,16 +205,33 @@ public final class AudioFingerprintCollector implements AutoCloseable {
     }
 
     private void handleState(long sessionId, ProbeAdapterState state) {
-        if (state != ProbeAdapterState.ENDED) return;
         ActiveCapture capture;
-        ProbeToolError error;
+        ProbeToolError error = null;
         synchronized (monitor) {
             capture = active;
             if (!isActive(capture, sessionId)) return;
-            error = finishWithErrorLocked(capture, ProbeToolErrorCode.TIMELINE_UNRELIABLE,
-                    false, "媒体结束前未完整覆盖指纹锚点", null);
+            if (state == ProbeAdapterState.DECODING) {
+                FiniteVodTimelineGate.Decision decision = capture.timelineGate.markReady();
+                if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
+                    error = finishWithErrorLocked(capture,
+                            ProbeToolErrorCode.LIVE_STREAM_NOT_SUPPORTED, false,
+                            "指纹采集仅支持有限时长点播", null);
+                } else if (decision == FiniteVodTimelineGate.Decision.VOD_CONFIRMED
+                        && capture.timelineGate.getDurationMs() > 0L
+                        && capture.request.getAdEndMs()
+                        > capture.timelineGate.getDurationMs()) {
+                    error = finishWithErrorLocked(capture, ProbeToolErrorCode.INVALID_REQUEST,
+                            false, "广告结束位置超过媒体时长", null);
+                }
+            } else if (state == ProbeAdapterState.ENDED) {
+                error = finishWithErrorLocked(capture, ProbeToolErrorCode.TIMELINE_UNRELIABLE,
+                        false, "媒体结束前未完整覆盖指纹锚点", null);
+            }
         }
-        dispatchError(capture, error);
+        if (error != null) {
+            stopOnControl(sessionId);
+            dispatchError(capture, error);
+        }
     }
 
     private void handleAdapterError(long sessionId, ProbeErrorCode code, boolean fatal,
@@ -549,6 +571,7 @@ public final class AudioFingerprintCollector implements AutoCloseable {
         final FingerprintCaptureRequest request;
         final FingerprintCaptureListener listener;
         final FingerprintAssembler assembler;
+        final FiniteVodTimelineGate timelineGate = new FiniteVodTimelineGate();
         int lastPercent = -1;
         boolean terminal;
         boolean callbackTerminal;

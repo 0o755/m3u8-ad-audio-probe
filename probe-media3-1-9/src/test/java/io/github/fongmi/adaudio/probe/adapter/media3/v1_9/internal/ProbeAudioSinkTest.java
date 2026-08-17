@@ -47,6 +47,7 @@ public class ProbeAudioSinkTest {
                 .setPcmEncoding(C.ENCODING_PCM_16BIT)
                 .build();
         sink.configure(format, 0, new int[]{2, 0});
+        sink.confirmVodTimeline();
         ByteBuffer pcm = ByteBuffer.allocateDirect(12).order(ByteOrder.LITTLE_ENDIAN);
         pcm.asShortBuffer().put(new short[]{1, 2, 3, 4, 5, 6});
 
@@ -67,6 +68,7 @@ public class ProbeAudioSinkTest {
                 .setPcmEncoding(C.ENCODING_PCM_16BIT)
                 .build();
         sink.configure(format, 0, null);
+        sink.confirmVodTimeline();
         ByteBuffer pcm = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
 
         sink.blockUntilTimelineReset();
@@ -87,6 +89,7 @@ public class ProbeAudioSinkTest {
                 .setPcmEncoding(C.ENCODING_PCM_16BIT)
                 .build();
         sink.configure(format, 0, null);
+        sink.confirmVodTimeline();
         long rendererOffsetUs = 1_000_000_000_000L;
         sink.setOutputStreamOffsetUs(rendererOffsetUs);
         ByteBuffer pcm = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
@@ -109,12 +112,36 @@ public class ProbeAudioSinkTest {
                 .setPcmEncoding(C.ENCODING_PCM_16BIT)
                 .build();
         sink.configure(format, 0, null);
+        sink.confirmVodTimeline();
         long rendererOffsetUs = 1_000_000_000_000L;
         sink.setOutputStreamOffsetUs(rendererOffsetUs);
         ByteBuffer pcm = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
 
         assertTrue(sink.handleBuffer(pcm, rendererOffsetUs + 14_000_000L, 1));
         assertEquals(14_000_000L, consumer.frame.getPresentationTimeUs());
+    }
+
+    @Test
+    public void holdsPcmUntilFiniteVodTimelineIsConfirmed() throws Exception {
+        RecordingConsumer consumer = new RecordingConsumer();
+        ProbeAudioSink sink = new ProbeAudioSink(consumer, () -> { },
+                new AtomicLong(), 15_000L);
+        Format format = new Format.Builder()
+                .setSampleMimeType(MimeTypes.AUDIO_RAW)
+                .setSampleRate(48_000)
+                .setChannelCount(1)
+                .setPcmEncoding(C.ENCODING_PCM_16BIT)
+                .build();
+        sink.configure(format, 0, null);
+        ByteBuffer pcm = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
+
+        assertFalse(sink.handleBuffer(pcm, 0L, 1));
+        assertEquals(0, pcm.position());
+        assertEquals(null, consumer.frame);
+
+        sink.confirmVodTimeline();
+        assertTrue(sink.handleBuffer(pcm, 0L, 1));
+        assertNotNull(consumer.frame);
     }
 
     private static final class RecordingConsumer implements ProbePcmConsumer {

@@ -13,6 +13,7 @@ import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterFactory;
 import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterRequest;
 import io.github.fongmi.adaudio.probe.adapter.ProbeAdapterState;
 import io.github.fongmi.adaudio.probe.adapter.ProbePcmFrame;
+import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
 import io.github.fongmi.adaudio.probe.internal.core.AdAudioMatcher;
 import io.github.fongmi.adaudio.probe.internal.core.AdRuleSet;
 import io.github.fongmi.adaudio.probe.internal.core.FeedResult;
@@ -200,6 +201,7 @@ public final class ProbeSessionEngine implements AutoCloseable {
         }
         AnalysisContext current = analysis;
         if (current == null || current.sessionId != expectedSessionId) return;
+        if (!current.timelineGate.isVodConfirmed()) return;
         long startMs = frame.getPresentationTimeUs() / 1000L;
         long endMs = frame.getEndPositionUs() / 1000L;
         FeedResult result;
@@ -429,8 +431,15 @@ public final class ProbeSessionEngine implements AutoCloseable {
         @Override
         public void onTimeline(long sessionId, long newDurationMs,
                                boolean live, boolean dynamic) {
-            if (!isOperationalCurrent(sessionId)) return;
-            if (live || dynamic) {
+            AnalysisContext current = analysis;
+            if (current == null || current.sessionId != sessionId
+                    || !isOperationalCurrent(sessionId)) return;
+            FiniteVodTimelineGate.Decision decision;
+            synchronized (current) {
+                if (!isAnalysisCurrent(current)) return;
+                decision = current.timelineGate.update(newDurationMs, live, dynamic);
+            }
+            if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
                 fail(sessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED, true,
                         false, "仅支持有限时长的普通点播", null);
                 return;
@@ -438,6 +447,9 @@ public final class ProbeSessionEngine implements AutoCloseable {
             synchronized (lifecycleLock) {
                 if (!isOperationalCurrent(sessionId)) return;
                 durationMs = Math.max(-1L, newDurationMs);
+            }
+            if (decision == FiniteVodTimelineGate.Decision.VOD_CONFIRMED) {
+                emitState(sessionId, ProbeState.ANALYZING);
             }
         }
 
@@ -449,6 +461,16 @@ public final class ProbeSessionEngine implements AutoCloseable {
                     emitState(sessionId, ProbeState.PREPARING);
                     break;
                 case DECODING:
+                    AnalysisContext current = analysis;
+                    if (current == null || current.sessionId != sessionId) return;
+                    FiniteVodTimelineGate.Decision decision =
+                            current.timelineGate.markReady();
+                    if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
+                        fail(sessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED, true,
+                                false, "仅支持有限时长的普通点播", null);
+                        return;
+                    }
+                    if (decision == FiniteVodTimelineGate.Decision.PENDING) return;
                     emitState(sessionId, ProbeState.ANALYZING);
                     break;
                 case LOOKAHEAD_READY:
@@ -479,6 +501,7 @@ public final class ProbeSessionEngine implements AutoCloseable {
         final AdAudioMatcher matcher;
         final DetectionCoordinator coordinator = new DetectionCoordinator();
         final AdDispatchQueue dispatchQueue = new AdDispatchQueue();
+        final FiniteVodTimelineGate timelineGate = new FiniteVodTimelineGate();
         long analyzedThroughMs;
         boolean receivedPcm;
         boolean resetWatermarkOnNextPcm;

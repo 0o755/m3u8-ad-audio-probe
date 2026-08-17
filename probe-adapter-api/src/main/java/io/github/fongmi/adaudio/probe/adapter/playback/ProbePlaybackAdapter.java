@@ -47,8 +47,8 @@ public interface ProbePlaybackAdapter extends AutoCloseable {
         void onState(long sessionId, ProbePlaybackAdapterState state);
 
         /**
-         * 报告有限点播时间轴；时长未知时使用 {@link ProbePlaybackSnapshot#TIME_UNSET}，
-         * 直播或动态源由门面统一拒绝。
+         * 报告最新时间线快照；时长未知时使用 {@link ProbePlaybackSnapshot#TIME_UNSET}。
+         * 准备期快照允许被后续快照替换，适配器必须在 READY 前报告权威快照。
          */
         void onTimeline(long sessionId, long durationMs, boolean live, boolean dynamic);
 

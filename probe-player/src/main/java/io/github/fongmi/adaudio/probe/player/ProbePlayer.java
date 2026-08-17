@@ -15,6 +15,7 @@ import io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackAdapterState
 import io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackDiscontinuityReason;
 import io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackRequest;
 import io.github.fongmi.adaudio.probe.adapter.playback.ProbePlaybackSnapshot;
+import io.github.fongmi.adaudio.probe.adapter.internal.FiniteVodTimelineGate;
 import io.github.fongmi.adaudio.probe.player.internal.PlayerSerialExecutor;
 import io.github.fongmi.adaudio.probe.player.internal.ProbePlaybackAdapterResolver;
 
@@ -44,6 +45,7 @@ public final class ProbePlayer implements Closeable {
     private final PlayerSurfaceReconciler<Surface> surfaceReconciler =
             new PlayerSurfaceReconciler<>();
     private final PlayerPollGate pollGate = new PlayerPollGate();
+    private final FiniteVodTimelineGate timelineGate = new FiniteVodTimelineGate();
     private final long pollIntervalMs;
     private final AtomicLong sessionSequence = new AtomicLong();
     private final AtomicLong callbackGeneration = new AtomicLong();
@@ -121,6 +123,7 @@ public final class ProbePlayer implements Closeable {
             previousSessionId = activeSessionId;
             sessionId = nextSessionId();
             activeSessionId = sessionId;
+            timelineGate.reset();
             generation = callbackGeneration.incrementAndGet();
             next = new ProbePlayerStatus(ProbePlayerState.PREPARING, sessionId,
                     media.getId(), startPositionMs, startPositionMs,
@@ -256,6 +259,7 @@ public final class ProbePlayer implements Closeable {
             if (closed.get()) return;
             previousSessionId = activeSessionId;
             activeSessionId = 0L;
+            timelineGate.reset();
             generation = callbackGeneration.incrementAndGet();
             next = ProbePlayerStatus.idle(ProbePlayerState.IDLE);
             status = next;
@@ -312,6 +316,7 @@ public final class ProbePlayer implements Closeable {
             if (!closed.compareAndSet(false, true)) return;
             activeSessionId = 0L;
             attachedSurface = null;
+            timelineGate.reset();
             callbackGeneration.incrementAndGet();
             status = ProbePlayerStatus.idle(ProbePlayerState.CLOSED);
         }
@@ -417,6 +422,19 @@ public final class ProbePlayer implements Closeable {
 
     private void handleState(long sessionId, ProbePlaybackAdapterState adapterState) {
         if (adapterState == null) return;
+        if (adapterState == ProbePlaybackAdapterState.READY) {
+            FiniteVodTimelineGate.Decision decision;
+            synchronized (stateLock) {
+                if (!isSessionMutableLocked(sessionId)) return;
+                decision = timelineGate.markReady();
+            }
+            if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
+                handleError(sessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED, true, false,
+                        "可见播放器仅支持普通点播，不支持直播或动态时间轴", null);
+                return;
+            }
+            if (decision == FiniteVodTimelineGate.Decision.PENDING) return;
+        }
         ProbePlayerState mapped;
         switch (adapterState) {
             case BUFFERING:
@@ -451,26 +469,34 @@ public final class ProbePlayer implements Closeable {
     }
 
     private void handleTimeline(long sessionId, long durationMs, boolean live, boolean dynamic) {
-        if (live || dynamic) {
-            handleError(sessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED, true, false,
-                    "可见播放器仅支持普通点播，不支持直播或动态时间轴", null);
-            return;
-        }
         long normalizedDuration = durationMs < 0L
                 ? ProbePlaybackSnapshot.TIME_UNSET : durationMs;
-        ProbePlayerStatus next;
-        long generation;
+        FiniteVodTimelineGate.Decision decision;
+        ProbePlayerStatus next = null;
+        long generation = 0L;
+        boolean resumeReady;
         synchronized (stateLock) {
             ProbePlayerStatus current = status;
-            if (!isSessionMutableLocked(sessionId)
-                    || current.getDurationMs() == normalizedDuration) return;
-            next = copyStatus(current, current.getState(), current.getPositionMs(),
-                    current.getBufferedPositionMs(), normalizedDuration, current.isPlaying(),
-                    current.getVideoSize(), current.getLastError());
-            status = next;
-            generation = callbackGeneration.get();
+            if (!isSessionMutableLocked(sessionId)) return;
+            decision = timelineGate.update(normalizedDuration, live, dynamic);
+            if (current.getDurationMs() != normalizedDuration) {
+                next = copyStatus(current, current.getState(), current.getPositionMs(),
+                        current.getBufferedPositionMs(), normalizedDuration, current.isPlaying(),
+                        current.getVideoSize(), current.getLastError());
+                status = next;
+                generation = callbackGeneration.get();
+            }
+            resumeReady = decision == FiniteVodTimelineGate.Decision.VOD_CONFIRMED
+                    && timelineGate.isReady()
+                    && current.getState() != ProbePlayerState.READY;
         }
-        dispatchStatus(next, generation);
+        if (next != null) dispatchStatus(next, generation);
+        if (decision == FiniteVodTimelineGate.Decision.UNSUPPORTED) {
+            handleError(sessionId, ProbeErrorCode.LIVE_STREAM_NOT_SUPPORTED, true, false,
+                    "可见播放器仅支持普通点播，不支持直播或动态时间轴", null);
+        } else if (resumeReady) {
+            handleState(sessionId, ProbePlaybackAdapterState.READY);
+        }
     }
 
     private void handleDiscontinuity(long sessionId, long positionMs,
