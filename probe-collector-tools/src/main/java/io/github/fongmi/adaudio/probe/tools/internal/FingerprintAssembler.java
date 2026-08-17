@@ -17,7 +17,9 @@ import io.github.fongmi.adaudio.probe.tools.FingerprintSequence;
 /** 模块内部的有界 PCM 对齐器；公开层永远不返回其缓冲。 */
 public final class FingerprintAssembler {
     private static final int TARGET_RATE = AdRuleSet.SAMPLE_RATE;
-    private static final int MAX_MISSING_SAMPLES = TARGET_RATE / 200; // 最多允许 5ms 舍入缺口。
+    private static final int MAX_INTERNAL_MISSING_SAMPLES = TARGET_RATE / 200;
+    // AAC 首尾 PTS 可能偏移一个解码帧；只修补边缘，不放宽锚点内部连续性。
+    private static final int MAX_EDGE_MISSING_SAMPLES = TARGET_RATE / 20;
 
     private final FingerprintCaptureRequest request;
     private final long anchorStartUs;
@@ -25,6 +27,7 @@ public final class FingerprintAssembler {
     private final short[] mono;
     private final BitSet filled;
     private int filledCount;
+    private long observedThroughUs = -1L;
 
     public FingerprintAssembler(FingerprintCaptureRequest request) {
         if (request == null) throw new IllegalArgumentException("采集请求不能为空");
@@ -42,6 +45,7 @@ public final class FingerprintAssembler {
         if (frame == null) return filledCount;
         long frameStartUs = frame.getPresentationTimeUs();
         long frameEndUs = frame.getEndPositionUs();
+        observedThroughUs = Math.max(observedThroughUs, frameEndUs);
         if (frameEndUs <= anchorStartUs || frameStartUs >= anchorEndUs) return filledCount;
 
         int first = targetIndexAtOrAfter(Math.max(anchorStartUs, frameStartUs));
@@ -79,8 +83,7 @@ public final class FingerprintAssembler {
     }
 
     public synchronized boolean isComplete() {
-        return mono.length - filledCount <= MAX_MISSING_SAMPLES
-                && longestMissingRun() <= MAX_MISSING_SAMPLES;
+        return hasSafeCoverage();
     }
 
     /** 丢弃断点前的全部采样，禁止跨时间线拼接指纹。 */
@@ -88,12 +91,12 @@ public final class FingerprintAssembler {
         java.util.Arrays.fill(mono, (short) 0);
         filled.clear();
         filledCount = 0;
+        observedThroughUs = -1L;
     }
 
     /** 完成有界缺口修复并生成规则；区分度不足由核心规则校验拒绝。 */
     public synchronized FingerprintRuleDraft finish() {
-        int missing = mono.length - filledCount;
-        if (missing > MAX_MISSING_SAMPLES || longestMissingRun() > MAX_MISSING_SAMPLES) {
+        if (!hasSafeCoverage()) {
             throw new IllegalStateException("音频时间轴未完整覆盖指纹锚点");
         }
         fillSmallGaps();
@@ -123,14 +126,30 @@ public final class FingerprintAssembler {
                 (numerator + 1_000_000L - 1L) / 1_000_000L);
     }
 
-    private int longestMissingRun() {
+    private boolean hasSafeCoverage() {
+        int firstFilled = filled.nextSetBit(0);
+        if (firstFilled < 0) return false;
+        int lastFilledExclusive = filled.length();
+        int leadingMissing = firstFilled;
+        int trailingMissing = mono.length - lastFilledExclusive;
+        if (leadingMissing > MAX_EDGE_MISSING_SAMPLES
+                || trailingMissing > MAX_EDGE_MISSING_SAMPLES) return false;
+        // 先等解码水位越过锚点终点，避免把尚未到达的尾帧误当成永久缺口。
+        if (trailingMissing > 0 && observedThroughUs < anchorEndUs) return false;
+        int internalMissing = mono.length - filledCount - leadingMissing - trailingMissing;
+        return internalMissing <= MAX_INTERNAL_MISSING_SAMPLES
+                && longestInternalMissingRun(firstFilled, lastFilledExclusive)
+                <= MAX_INTERNAL_MISSING_SAMPLES;
+    }
+
+    private int longestInternalMissingRun(int firstFilled, int lastFilledExclusive) {
         int longest = 0;
-        int cursor = 0;
-        while (cursor < mono.length) {
+        int cursor = firstFilled;
+        while (cursor < lastFilledExclusive) {
             int start = filled.nextClearBit(cursor);
-            if (start >= mono.length) break;
+            if (start >= lastFilledExclusive) break;
             int end = filled.nextSetBit(start);
-            if (end < 0) end = mono.length;
+            if (end < 0 || end > lastFilledExclusive) end = lastFilledExclusive;
             longest = Math.max(longest, end - start);
             cursor = end;
         }

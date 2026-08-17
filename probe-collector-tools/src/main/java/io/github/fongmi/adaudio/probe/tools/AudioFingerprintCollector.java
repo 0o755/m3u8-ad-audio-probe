@@ -32,6 +32,7 @@ import io.github.fongmi.adaudio.probe.tools.internal.SerialCallbackExecutor;
 public final class AudioFingerprintCollector implements AutoCloseable {
     private static final long MIN_TIMEOUT_MS = 5_000L;
     private static final long MAX_TIMEOUT_MS = 120_000L;
+    private static final long DECODE_PREROLL_MS = 1_000L;
     private static final long DECODE_MARGIN_MS = 1_500L;
 
     private final Object monitor = new Object();
@@ -139,16 +140,18 @@ public final class AudioFingerprintCollector implements AutoCloseable {
                     || !capture.timelineGate.isVodConfirmed()) return;
             try {
                 capture.assembler.append(frame);
-                int percent = (int) Math.min(100L,
+                boolean complete = capture.assembler.isComplete();
+                int percent = complete ? 100 : (int) Math.min(99L,
                         capture.assembler.getFilledCount() * 100L
                                 / capture.assembler.getRequiredCount());
                 if (percent > capture.lastPercent) {
                     capture.lastPercent = percent;
                     progress = new FingerprintCaptureProgress(sessionId,
-                            capture.assembler.getCoveredDurationMs(),
+                            complete ? capture.request.getAnchorDurationMs()
+                                    : capture.assembler.getCoveredDurationMs(),
                             capture.request.getAnchorDurationMs());
                 }
-                if (capture.assembler.isComplete()) {
+                if (complete) {
                     completed = capture.assembler.finish();
                     capture.terminal = true;
                     active = null;
@@ -255,11 +258,13 @@ public final class AudioFingerprintCollector implements AutoCloseable {
             if (!isActive(active, capture.sessionId)) return;
         }
         try {
-            long startMs = capture.request.getAdStartMs()
+            long anchorStartMs = capture.request.getAdStartMs()
                     + capture.request.getAnchorOffsetMs();
+            long prerollMs = Math.min(DECODE_PREROLL_MS, anchorStartMs);
+            long startMs = anchorStartMs - prerollMs;
             adapter.open(new ProbeAdapterRequest(capture.sessionId,
                     capture.request.getMedia(), startMs,
-                    capture.request.getAnchorDurationMs() + DECODE_MARGIN_MS));
+                    prerollMs + capture.request.getAnchorDurationMs() + DECODE_MARGIN_MS));
         } catch (LinkageError failure) {
             fail(capture.sessionId, ProbeToolErrorCode.UNSUPPORTED_SOURCE, false,
                     "音频适配器二进制版本不兼容", failure);
