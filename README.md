@@ -19,7 +19,7 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 
 当前预发布包先进入 GitHub Packages。GitHub Packages 仍要求宿主配置仓库地址和读取凭据，因此不把它宣传成“一行接入”；真正的一行依赖以 Maven Central 正式版本为准。源码调试可直接 `includeBuild` 或依赖 `project(":probe")`。
 
-默认聚合包使用官方 Media3 `1.9.2` 适配器，并只在该适配器内严格约束 Media3；公共 runtime 和 adapter SPI 完全不依赖 Media3。宿主已经使用其他 Media3 版本时，应选择对应版本的官方适配器，或实现自己的适配器，而不是让 Gradle 静默混用不稳定接口。当前首个官方实现坐标为 `ad-audio-probe-media3-1.9.2`。
+默认聚合包使用官方 Media3 `1.9.2` 适配器，并只在该适配器内严格约束 Media3；公共 runtime 和 adapter SPI 完全不依赖 Media3。宿主已经使用其他 Media3 版本时，应选择对应版本的官方适配器，或实现自己的适配器，而不是让 Gradle 静默混用不稳定接口。官方适配器目前覆盖 `1.9.2`、`1.10.1` 和 `1.11.0`。
 
 默认坐标同时提供检测、可见播放和采集工具；它们也可以按需独立依赖：
 
@@ -31,8 +31,22 @@ implementation("io.github.0o755:ad-audio-probe:0.1.0")
 | `ad-audio-probe-collector-tools` | 指纹采集与 HLS 候选扫描 | 否 |
 | `ad-audio-probe-adapter-api` | 音频探针和可见播放的第三方 SPI | 否 |
 | `ad-audio-probe-media3-1.9.2` | 两套 SPI 的官方 Media3 实现 | 是，严格 1.9.2 |
+| `ad-audio-probe-media3-1.10.1` | 两套 SPI 的官方 Media3 实现 | 是，严格 1.10.1 |
+| `ad-audio-probe-media3-1.11.0` | 两套 SPI 的官方 Media3 实现 | 是，严格 1.11.0 |
 
 表中的“否”表示制品本身不绑定 Media3，不表示它能脱离媒体后端独立解码。`player` 和指纹采集在默认聚合包中会自动发现官方适配器；单独依赖这些制品时，还需要同时依赖一个官方适配器，或通过 Builder 显式注入自己的工厂。HLS 清单候选扫描不解码媒体，因此不需要播放器适配器。
+
+替换默认 Media3 版本时，必须排除 `1.9.2` 并只带入一个适配器：
+
+```kotlin
+implementation("io.github.0o755:ad-audio-probe:0.1.0") {
+    exclude(group = "io.github.0o755", module = "ad-audio-probe-media3-1.9.2")
+}
+runtimeOnly("io.github.0o755:ad-audio-probe-media3-1.10.1:0.1.0")
+// 或改为 ad-audio-probe-media3-1.11.0
+```
+
+`1.10.1` 和 `1.11.0` 的 AndroidX AAR 元数据要求宿主 `compileSdk >= 36`；默认 `1.9.2` 仍保持原有要求。不要同时引入两套官方适配器，服务发现会明确拒绝多个 provider。
 
 ## 规则格式
 
@@ -211,7 +225,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 
 ## 可替换适配器
 
-默认依赖会自动发现官方 Media3 1.9.2 实现。底层已经拆成独立的音频探针 SPI 与可见播放 SPI，第三方可以实现 VLC、FFmpeg、系统 MediaCodec 或其他播放器后端；音频适配器只提交 PCM16、真实 PTS、时间轴和结构化错误，不能接触规则、匹配结果或宿主 seek。
+默认依赖会自动发现官方 Media3 1.9.2 实现；宿主也可替换为独立发布的 1.10.1 或 1.11.0 适配器。底层已经拆成独立的音频探针 SPI 与可见播放 SPI，第三方可以实现 VLC、FFmpeg、系统 MediaCodec 或其他播放器后端；音频适配器只提交 PCM16、真实 PTS、时间轴和结构化错误，不能接触规则、匹配结果或宿主 seek。
 
 自定义实现只依赖 runtime，不会携带 Media3：
 
@@ -227,7 +241,7 @@ probe = AdAudioProbe.builder(context, rulesUrl)
         .build();
 ```
 
-检测侧通过 `ProbeAdapterFactory` 注入，可见播放侧通过 `ProbePlaybackAdapterFactory` 注入。SPI 版本、PCM 借用语义、Surface 所有权、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。未来的官方 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
+检测侧通过 `ProbeAdapterFactory` 注入，可见播放侧通过 `ProbePlaybackAdapterFactory` 注入。SPI 版本、PCM 借用语义、Surface 所有权、线程和会话约束见 [适配器开发合同](docs/ADAPTERS.md)。各 Media3 版本适配器使用独立制品和独立包名发布，不会复制 runtime，也不会在一个 APK 中保留多套匹配状态机。
 
 所有公开方法线程安全，且不会在调用线程执行网络或解码 I/O。为保证过期媒体回调绝不跨代执行，`open`、`stop`、`setEnabled` 和 `close` 会与正在执行的宿主回调串行；宿主回调必须快速返回。默认在 Android 主线程串行读取 `PlaybackClock` 并调用监听器；宿主播放器使用专用线程时，通过 `setHostExecutor()` 指定一个真正异步、可持续提交任务的 Executor。
 
@@ -244,13 +258,13 @@ probe = AdAudioProbe.builder(context, rulesUrl)
 
 宿主与探针必须使用能稳定返回同一内容、同一媒体时间轴和同一目标音轨的 URL 与请求头。每次请求动态个性化内容、带 `ENDLIST` 的 SSAI 伪点播或宿主主动切换到不同语言音轨，都超出首版自动跳转保证；这类来源应显式停用 Probe 或提供能复现宿主音轨的自定义适配器。
 
-Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前 Release AAR 大小为：薄聚合 1.1 KiB、runtime 56.5 KiB、适配器 API 8.9 KiB、player 30.9 KiB、collector-tools 76.1 KiB、官方 Media3 适配器 45.4 KiB。Release R8 烟测同时引用检测、可见播放、采集和扫描 API：默认一行依赖 APK 为 128.5 KiB，只接 runtime/player/tools 与自定义空适配器的无 Media3 APK 为 25.9 KiB。这些是最小测试宿主的结果，真实增量仍应以应用自己的 Release APK 差值为准。
+Media3 `1.9.2` 相关原始 AAR 合计约 3.36 MiB，但不会原样打进宿主。当前 Release AAR 大小为：薄聚合 1.1 KiB、runtime 57.6 KiB、适配器 API 10.5 KiB、player 31.4 KiB、collector-tools 77.5 KiB；三套官方 Media3 适配器均约 49.8 KiB。Release R8 烟测同时引用检测、可见播放、采集和扫描 API：默认一行依赖 APK 为 128.5 KiB，只接 runtime/player/tools 与自定义空适配器的无 Media3 APK 为 25.9 KiB。这些是最小测试宿主的结果，真实增量仍应以应用自己的 Release APK 差值为准。
 
 当前 `0.1.x` 是预发布线。JVM 状态机、lint、AAR、Maven 传递依赖和 Release R8 已纳入 CI；正式宣称稳定前仍需完成 API 23/29/35 真机的 AAC-TS HLS、fMP4 HLS、普通 MP4、seek/回退与 ENDED 恢复测试。
 
 ## 构建
 
-要求 JDK 17、Android SDK 35：
+要求 JDK 17、Android SDK 36；只消费默认 `1.9.2` 适配器的宿主仍可使用原有 compileSdk 要求：
 
 ```bash
 ./gradlew test lintRelease assembleRelease publishToMavenLocal

@@ -24,5 +24,7 @@ include(
     ":probe-player",
     ":probe-collector-tools",
     ":probe-media3-1-9",
+    ":probe-media3-1-10",
+    ":probe-media3-1-11",
     ":probe"
 )

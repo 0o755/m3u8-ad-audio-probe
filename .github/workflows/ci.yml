@@ -32,3 +32,5 @@ jobs:
             probe-player/build/outputs/aar/probe-player-release.aar
             probe-collector-tools/build/outputs/aar/probe-collector-tools-release.aar
             probe-media3-1-9/build/outputs/aar/probe-media3-1-9-release.aar
+            probe-media3-1-10/build/outputs/aar/probe-media3-1-10-release.aar
+            probe-media3-1-11/build/outputs/aar/probe-media3-1-11-release.aar

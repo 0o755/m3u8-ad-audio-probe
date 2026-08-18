@@ -10,6 +10,8 @@ probe-runtime      Android 门面、规则缓存、会话与跳转安全状态�
 probe-player       可见点播播放器门面，不包含具体播放器
 probe-collector-tools 指纹采集与 HLS 结构候选扫描
 probe-media3-1-9   官方 Media3 1.9.2 音频与可见播放适配器
+probe-media3-1-10  官方 Media3 1.10.1 音频与可见播放适配器
+probe-media3-1-11  官方 Media3 1.11.0 音频与可见播放适配器
 probe              默认薄聚合，组合 runtime/player/tools 与一个官方适配器
 ```
 
@@ -82,8 +84,8 @@ PCM16 + 真实 PTS --> ProbeSessionEngine --> AdAudioMatcher
 
 ## 发布约束
 
-- `minSdk 23`、`compileSdk 35`、Java 8 ABI、构建 JDK 17。
-- Media3 1.9.2 严格约束只属于对应官方适配器；runtime 和第三方适配器不继承该约束。
+- `minSdk 23`、Java 8 ABI、构建 JDK 17；Media3 1.10.1/1.11.0 适配器使用 `compileSdk 36`。
+- Media3 1.9.2、1.10.1 和 1.11.0 的严格约束分别属于对应官方适配器；runtime 和第三方适配器不继承该约束。
 - AAR 不预混淆、不打 fat AAR；宿主 Release R8 负责全局裁剪。
 - consumer rules 不保留整套 Media3，避免体积失控。
 - 独立 `consumer-smoke` 同时构建默认聚合消费者与零 Media3 的自定义适配器消费者，验证 Maven 传递依赖、ServiceLoader 和 R8 合同。

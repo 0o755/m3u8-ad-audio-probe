@@ -21,6 +21,14 @@ val media3AdapterContract by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
 }
+val media3Adapter110Contract by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+val media3Adapter111Contract by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
 val playerContract by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
@@ -33,6 +41,14 @@ val media3ConflictContract by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
 }
+val media3Conflict110Contract by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+val media3Conflict111Contract by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
 
 dependencies {
     add(defaultProbeContract.name,
@@ -41,6 +57,10 @@ dependencies {
         "io.github.0o755:ad-audio-probe-runtime:${probeVersion.get()}")
     add(media3AdapterContract.name,
         "io.github.0o755:ad-audio-probe-media3-1.9.2:${probeVersion.get()}")
+    add(media3Adapter110Contract.name,
+        "io.github.0o755:ad-audio-probe-media3-1.10.1:${probeVersion.get()}")
+    add(media3Adapter111Contract.name,
+        "io.github.0o755:ad-audio-probe-media3-1.11.0:${probeVersion.get()}")
     add(playerContract.name,
         "io.github.0o755:ad-audio-probe-player:${probeVersion.get()}")
     add(collectorToolsContract.name,
@@ -48,12 +68,45 @@ dependencies {
     add(media3ConflictContract.name,
         "io.github.0o755:ad-audio-probe-media3-1.9.2:${probeVersion.get()}")
     add(media3ConflictContract.name, "androidx.media3:media3-common:1.10.1")
+    add(media3Conflict110Contract.name,
+        "io.github.0o755:ad-audio-probe-media3-1.10.1:${probeVersion.get()}")
+    add(media3Conflict110Contract.name, "androidx.media3:media3-common:1.9.2")
+    add(media3Conflict111Contract.name,
+        "io.github.0o755:ad-audio-probe-media3-1.11.0:${probeVersion.get()}")
+    add(media3Conflict111Contract.name, "androidx.media3:media3-common:1.10.1")
 }
 
 fun Configuration.moduleIds(): Set<String> = incoming.resolutionResult.allComponents
     .mapNotNull { it.id as? ModuleComponentIdentifier }
     .map { "${it.group}:${it.module}" }
     .toSet()
+
+fun Configuration.media3Versions(): Set<String> = incoming.resolutionResult.allComponents
+    .mapNotNull { it.id as? ModuleComponentIdentifier }
+    .filter { it.group == "androidx.media3" }
+    .map { it.version }
+    .toSet()
+
+fun verifyMedia3Adapter(
+    configuration: Configuration,
+    coordinate: String,
+    expectedMedia3Version: String
+) {
+    val modules = configuration.moduleIds()
+    check("io.github.0o755:ad-audio-probe-adapter-api" in modules) {
+        "$coordinate 没有传递 adapter SPI"
+    }
+    check("io.github.0o755:ad-audio-probe-core" !in modules) {
+        "$coordinate 不应反向携带匹配核心"
+    }
+    check("androidx.media3:media3-exoplayer" in modules
+            && "androidx.media3:media3-exoplayer-hls" in modules) {
+        "$coordinate 发布元数据缺少完整播放器依赖"
+    }
+    check(configuration.media3Versions() == setOf(expectedMedia3Version)) {
+        "$coordinate 必须严格使用 Media3 $expectedMedia3Version，实际为 ${configuration.media3Versions()}"
+    }
+}
 
 tasks.register("verifyPublishedModuleGraph") {
     group = "verification"
@@ -95,21 +148,31 @@ tasks.register("verifyPublishedModuleGraph") {
             "采集工具应复用匹配核心，但不得绑定具体媒体实现"
         }
 
-        val adapterModules = media3AdapterContract.moduleIds()
-        check("io.github.0o755:ad-audio-probe-adapter-api" in adapterModules) {
-            "Media3 适配器没有传递 adapter SPI"
-        }
-        check("io.github.0o755:ad-audio-probe-core" !in adapterModules) {
-            "媒体适配器不应反向携带匹配核心"
-        }
-        check("androidx.media3:media3-exoplayer" in adapterModules
-                && "androidx.media3:media3-exoplayer-hls" in adapterModules) {
-            "Media3 适配器发布元数据缺少完整播放器依赖"
-        }
+        verifyMedia3Adapter(
+            media3AdapterContract,
+            "ad-audio-probe-media3-1.9.2",
+            "1.9.2"
+        )
+        verifyMedia3Adapter(
+            media3Adapter110Contract,
+            "ad-audio-probe-media3-1.10.1",
+            "1.10.1"
+        )
+        verifyMedia3Adapter(
+            media3Adapter111Contract,
+            "ad-audio-probe-media3-1.11.0",
+            "1.11.0"
+        )
 
-        val conflict = runCatching { media3ConflictContract.resolve() }.exceptionOrNull()
-        check(conflict != null) {
-            "官方适配器必须在构建期拒绝 Media3 组件混用不同版本"
+        listOf(
+            media3ConflictContract,
+            media3Conflict110Contract,
+            media3Conflict111Contract
+        ).forEach { configuration ->
+            val conflict = runCatching { configuration.resolve() }.exceptionOrNull()
+            check(conflict != null) {
+                "${configuration.name} 必须在构建期拒绝 Media3 组件混用不同版本"
+            }
         }
     }
 }

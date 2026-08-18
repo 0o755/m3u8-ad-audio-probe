@@ -107,9 +107,11 @@ Factory 在构建 Probe 时调用，不得启动网络或解码。所有 `open/u
 
 ```text
 io.github.0o755:ad-audio-probe-media3-1.9.2
+io.github.0o755:ad-audio-probe-media3-1.10.1
+io.github.0o755:ad-audio-probe-media3-1.11.0
 ```
 
-未来适配不同 Media3 ABI 时使用新的制品和版本化实现包；不会把多个 Media3 版本打进 fat AAR，也不会要求第三方复制 matcher。
+不同 Media3 ABI 使用新的制品和版本化实现包；不会把多个 Media3 版本打进 fat AAR，也不会要求第三方复制 matcher。每个制品严格约束整套 Media3 组件版本，宿主只能选择一个 provider；其中 `1.10.1` 和 `1.11.0` 要求 `compileSdk >= 36`。
 
 ## 可见播放 SPI
 
